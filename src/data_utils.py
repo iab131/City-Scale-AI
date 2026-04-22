@@ -12,10 +12,16 @@ def load_metr_la_h5(h5_path: str) -> np.ndarray:
             T = number of timesteps
             N = number of sensors
     """
-    df = pd.read_hdf(h5_path)
-    # Usually rows are timestamps and columns are sensors
-    data = df.to_numpy(dtype=np.float32)
-    return data
+    import h5py
+    with h5py.File(h5_path, "r") as f:
+        # Pytables/pandas often stores the 2D array in 'df/block0_values'
+        # The shape is usually [N, T] or [T, N]. 
+        data = f["df"]["block0_values"][:]
+        # In pandas HDFStore, if shape is (N, T), it might be transposed when read as DataFrame
+        # METR-LA typically has T=34272, N=207. Let's ensure it returns [T, N].
+        if data.shape[0] == 207 and data.shape[1] == 34272:
+            data = data.T
+    return data.astype(np.float32)
 
 
 def load_adj_pkl(pkl_path: str):
@@ -29,7 +35,7 @@ def load_adj_pkl(pkl_path: str):
         obj = pickle.load(f, encoding="latin1")
 
     # Common DCRNN-style format
-    if isinstance(obj, tuple) and len(obj) == 3:
+    if isinstance(obj, (tuple, list)) and len(obj) == 3:
         sensor_ids, sensor_id_to_ind, adj_mx = obj
         return sensor_ids, sensor_id_to_ind, np.asarray(adj_mx, dtype=np.float32)
 

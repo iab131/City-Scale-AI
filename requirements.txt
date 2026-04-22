@@ -9,3 +9,4 @@ h5py
 networkx
 matplotlib
 torch-geometric
+tables
