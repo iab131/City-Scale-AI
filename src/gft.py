@@ -14,11 +14,19 @@ def compute_gft_basis(L, k: int):
         evals: [k]
         evecs: [N, k]
     """
-    # Smallest algebraic eigenvalues -> smoothest graph frequencies
-    evals, evecs = eigsh(L, k=k, which="SA")
-    idx = np.argsort(evals)
-    evals = evals[idx]
-    evecs = evecs[:, idx]
+    import scipy.linalg
+    N = L.shape[0]
+    if k >= N - 1:
+        # Use dense eigh for k close to or equal to N
+        evals, evecs = scipy.linalg.eigh(L.toarray())
+        evals = evals[:k]
+        evecs = evecs[:, :k]
+    else:
+        # Smallest algebraic eigenvalues -> smoothest graph frequencies
+        evals, evecs = eigsh(L, k=k, which="SA")
+        idx = np.argsort(evals)
+        evals = evals[idx]
+        evecs = evecs[:, idx]
     return evals.astype(np.float32), evecs.astype(np.float32)
 
 

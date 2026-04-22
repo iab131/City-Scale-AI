@@ -37,33 +37,25 @@ def compute_metrics(preds, labels):
     return mae, rmse, mape
 
 
-def main():
-    os.makedirs(Config.checkpoint_dir, exist_ok=True)
+from preprocess import get_cached_gft_data
+
+def run_training(config_override=None):
+    # Apply overrides if any
+    config = Config()
+    if config_override:
+        for k, v in config_override.items():
+            setattr(config, k, v)
+            
+    os.makedirs(config.checkpoint_dir, exist_ok=True)
     
-    # 1. Load data
-    print("Loading data...")
+    # 1-4. Preprocess data (loading, normalizing, building graph, GFT transform)
     try:
-        X = load_metr_la_h5(Config.data_path)  # [T, N]
-        _, _, A = load_adj_pkl(Config.adj_path)
+        mean, std, L, evals, U, X_hat = get_cached_gft_data(
+            config.data_path, config.adj_path, config.k, cache_dir="cache/gft"
+        )
     except FileNotFoundError as e:
         print(f"Error loading dataset files. Ensure they exist at specified paths: {e}")
-        return
-
-    # 2. Normalize traffic values
-    print("Normalizing data and building graph...")
-    # Shape of mean and std will be [1, N]
-    mean = X.mean(axis=0, keepdims=True)
-    std = X.std(axis=0, keepdims=True) + 1e-6
-    X_norm = (X - mean) / std
-
-    # 3. Build Laplacian and GFT basis
-    # Symmetric normalized Laplacian L = I - D^{-1/2} A D^{-1/2}
-    L = normalized_laplacian(A)
-    evals, U = compute_gft_basis(L, k=Config.k)
-
-    # 4. Transform to spectral domain (GFT)
-    print("Computing Graph Fourier Transform...")
-    X_hat = gft(X_norm, U)  # [T, k]
+        return None
 
     # 5. Make splits
     n_total = len(X_hat)
@@ -74,19 +66,19 @@ def main():
     X_val = X_hat[n_train:n_train + n_val]
     X_test = X_hat[n_train + n_val:]
 
-    train_ds = SpectralTrafficDataset(X_train, input_len=Config.input_len, pred_len=Config.pred_len)
-    val_ds = SpectralTrafficDataset(X_val, input_len=Config.input_len, pred_len=Config.pred_len)
-    test_ds = SpectralTrafficDataset(X_test, input_len=Config.input_len, pred_len=Config.pred_len)
+    train_ds = SpectralTrafficDataset(X_train, input_len=config.input_len, pred_len=config.pred_len)
+    val_ds = SpectralTrafficDataset(X_val, input_len=config.input_len, pred_len=config.pred_len)
+    test_ds = SpectralTrafficDataset(X_test, input_len=config.input_len, pred_len=config.pred_len)
 
-    train_loader = DataLoader(train_ds, batch_size=Config.batch_size, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=Config.batch_size, shuffle=False)
-    test_loader = DataLoader(test_ds, batch_size=Config.batch_size, shuffle=False)
+    train_loader = DataLoader(train_ds, batch_size=config.batch_size, shuffle=True)
+    val_loader = DataLoader(val_ds, batch_size=config.batch_size, shuffle=False)
+    test_loader = DataLoader(test_ds, batch_size=config.batch_size, shuffle=False)
 
     # 6. Initialize Model
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}")
-    model = SpectralGRU(k=Config.k, hidden_dim=Config.hidden_dim, pred_len=Config.pred_len).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=Config.lr)
+    print(f"Using device: {device} for k={config.k}")
+    model = SpectralGRU(k=config.k, hidden_dim=config.hidden_dim, pred_len=config.pred_len).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
     loss_fn = torch.nn.L1Loss()  # Train in spectral space with L1 loss
 
     # Save inverse transform matrices onto the target device to enable fast metrics computation
@@ -126,9 +118,12 @@ def main():
         return total_mae / batches, total_rmse / batches, total_mape / batches
 
     # 7. Training Loop
-    print("Starting training...")
+    print(f"Starting training for k={config.k}...")
     best_val_mae = float('inf')
-    for epoch in range(Config.epochs):
+    best_val_rmse = float('inf')
+    best_val_mape = float('inf')
+    
+    for epoch in range(config.epochs):
         model.train()
         train_loss = 0.0
         for xb, yb in train_loader:
@@ -151,14 +146,26 @@ def main():
         # Save checkpoint if improvement is found
         if val_mae < best_val_mae:
             best_val_mae = val_mae
-            torch.save(model.state_dict(), os.path.join(Config.checkpoint_dir, "best_model.pth"))
+            best_val_rmse = val_rmse
+            best_val_mape = val_mape
+            torch.save(model.state_dict(), os.path.join(config.checkpoint_dir, f"best_model_k{config.k}.pth"))
             print("  -> Saved new best model!")
 
     # 8. Testing Evaluation
-    print("Testing best model...")
-    model.load_state_dict(torch.load(os.path.join(Config.checkpoint_dir, "best_model.pth")))
+    print(f"Testing best model for k={config.k}...")
+    model.load_state_dict(torch.load(os.path.join(config.checkpoint_dir, f"best_model_k{config.k}.pth")))
     test_mae, test_rmse, test_mape = evaluate(test_loader, "Test")
     print(f"Final Test - MAE: {test_mae:.4f} | RMSE: {test_rmse:.4f} | MAPE: {test_mape:.4f}")
+    
+    return {
+        "k": config.k,
+        "best_val_mae": best_val_mae,
+        "best_val_rmse": best_val_rmse,
+        "best_val_mape": best_val_mape,
+        "test_mae": test_mae,
+        "test_rmse": test_rmse,
+        "test_mape": test_mape
+    }
 
 if __name__ == "__main__":
-    main()
+    run_training()

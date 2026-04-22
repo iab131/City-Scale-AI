@@ -10,3 +10,4 @@ networkx
 matplotlib
 torch-geometric
 tables
+tabulate
