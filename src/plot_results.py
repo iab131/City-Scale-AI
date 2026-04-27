@@ -3,18 +3,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import shutil
 
-def plot_results():
-    csv_path = "outputs/experiments/k_sweep_results.csv"
-    if not os.path.exists(csv_path):
-        print(f"File not found: {csv_path}")
-        return
-        
-    df = pd.read_csv(csv_path)
-    
-    # Create a figure with subplots
+def create_plot(df, title, out_path, brain_path):
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     
-    # Define colors
     val_color = '#1f77b4'
     test_color = '#ff7f0e'
     
@@ -45,17 +36,51 @@ def plot_results():
     axes[2].grid(True, linestyle='--', alpha=0.7)
     axes[2].legend(fontsize=11)
     
-    plt.suptitle('GFT Traffic Forecasting: Error Metrics vs. Eigenvectors (k)', fontsize=16, y=1.05)
+    plt.suptitle(title, fontsize=16, y=1.05)
     plt.tight_layout()
     
-    # Save to project dir
-    out_path = "outputs/experiments/k_sweep_plot.png"
     plt.savefig(out_path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
     print(f"Plot saved successfully to {out_path}")
     
-    # Copy to brain dir for embedding
-    brain_path = r"C:\Users\baii\.gemini\antigravity\brain\b5ec29eb-fc45-4c96-9976-f54bec0f2e56\k_sweep_plot.png"
-    shutil.copy(out_path, brain_path)
+    if brain_path:
+        shutil.copy(out_path, brain_path)
+
+def plot_results():
+    csv_path = "outputs/experiments/k_sweep_results.csv"
+    if not os.path.exists(csv_path):
+        print(f"File not found: {csv_path}")
+        return
+        
+    df = pd.read_csv(csv_path)
+    
+    brain_dir = r"C:\Users\baii\.gemini\antigravity\brain\b5ec29eb-fc45-4c96-9976-f54bec0f2e56"
+    
+    # 1. Full
+    create_plot(
+        df,
+        'GFT Traffic Forecasting: Error Metrics vs. Eigenvectors (k)',
+        "outputs/experiments/k_sweep_plot.png",
+        os.path.join(brain_dir, "k_sweep_plot.png")
+    )
+    
+    # 2. k = 1 to 16
+    df_low = df[df['k'] <= 16]
+    create_plot(
+        df_low,
+        'GFT Traffic Forecasting: Error Metrics (k=1 to 16)',
+        "outputs/experiments/k_sweep_plot_low.png",
+        os.path.join(brain_dir, "k_sweep_plot_low.png")
+    )
+    
+    # 3. k = 16 to 207
+    df_high = df[df['k'] >= 16]
+    create_plot(
+        df_high,
+        'GFT Traffic Forecasting: Error Metrics (k=16 to 207)',
+        "outputs/experiments/k_sweep_plot_high.png",
+        os.path.join(brain_dir, "k_sweep_plot_high.png")
+    )
 
 if __name__ == "__main__":
     plot_results()

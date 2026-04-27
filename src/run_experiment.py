@@ -4,7 +4,7 @@ import pandas as pd
 from train import run_training
 
 def main():
-    k_values = [16, 32, 64, 96, 128, 207]
+    k_values = [1, 2, 4, 8, 12, 16]
     
     out_dir = "outputs/experiments"
     # Ensure it's relative to the project root, so we check cwd
