@@ -23,6 +23,11 @@ def parse_args():
     parser.add_argument('--device', type=str, default='cuda', help='Device to use (cuda/cpu)')
     parser.add_argument('--epochs', type=int, default=50, help='Number of epochs to train')
     parser.add_argument('--batch_size', type=int, default=16, help='Batch size')
+    parser.add_argument('--k', type=int, default=64, help='Number of GFT components')
+    parser.add_argument('--d_model', type=int, default=64, help='Model dimension')
+    parser.add_argument('--num_layers', type=int, default=2, help='Number of layers')
+    parser.add_argument('--learning_rate', type=float, default=0.001, help='Learning rate')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed')
     return parser.parse_args()
 
 class Config:
@@ -49,6 +54,20 @@ class Config:
     results_dir = "results/mamba"
 
 def run_mamba_training(config, args):
+    import random
+    import numpy as np
+    import datetime
+    
+    # Set seed
+    if hasattr(args, 'seed'):
+        torch.manual_seed(args.seed)
+        np.random.seed(args.seed)
+        random.seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+            
+    config.checkpoint_dir = "results/mamba/k_sweep/checkpoints"
+    config.results_dir = "results/mamba/k_sweep"
     os.makedirs(config.checkpoint_dir, exist_ok=True)
     os.makedirs(config.results_dir, exist_ok=True)
     
@@ -144,7 +163,7 @@ def run_mamba_training(config, args):
     best_val_rmse = float('inf')
     best_val_mape = float('inf')
     epochs_no_improve = 0
-    checkpoint_path = os.path.join(config.checkpoint_dir, "best_mamba_model.pth")
+    checkpoint_path = os.path.join(config.checkpoint_dir, f"best_mamba_k_{config.k}.pth")
     
     start_time = time.time()
     for epoch in range(config.epochs):
@@ -200,6 +219,7 @@ def run_mamba_training(config, args):
     print(f"\nFinal Test - MAE: {test_mae:.4f} | RMSE: {test_rmse:.4f} | MAPE: {test_mape:.4f}")
     
     return {
+        "k": config.k,
         "best_val_mae": best_val_mae,
         "best_val_rmse": best_val_rmse,
         "best_val_mape": best_val_mape,
@@ -208,11 +228,15 @@ def run_mamba_training(config, args):
         "test_mape": test_mape,
         "time_sec": round(end_time - start_time, 2),
         "device": device.type,
+        "gpu_name": torch.cuda.get_device_name(0) if device.type == 'cuda' else None,
         "model_name": "SpectralMambaReal",
         "d_model": config.d_model,
         "num_layers": config.num_layers,
         "batch_size": config.batch_size,
-        "learning_rate": config.learning_rate
+        "learning_rate": config.learning_rate,
+        "epochs_completed": epoch + 1,
+        "seed": args.seed if hasattr(args, 'seed') else None,
+        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
 
 def main():
@@ -221,6 +245,10 @@ def main():
     config = Config()
     config.epochs = args.epochs
     config.batch_size = args.batch_size
+    config.k = args.k
+    config.d_model = args.d_model
+    config.num_layers = args.num_layers
+    config.learning_rate = args.learning_rate
     # In a real setup we'd parse configs/mamba.yaml here if args.config is set.
     # For simplicity, using the Config class above with overrides from args.
     
@@ -228,8 +256,16 @@ def main():
     
     if res is not None:
         out_dir = config.results_dir
-        csv_path = os.path.join(out_dir, "mamba_gpu_results.csv")
-        df = pd.DataFrame([res])
+        csv_path = os.path.join(out_dir, "mamba_k_sweep_results.csv")
+        # Ensure we always have all columns in order
+        columns = [
+            "k", "best_val_mae", "best_val_rmse", "best_val_mape", 
+            "test_mae", "test_rmse", "test_mape", "time_sec", 
+            "device", "gpu_name", "model_name", "d_model", 
+            "num_layers", "batch_size", "learning_rate", 
+            "epochs_completed", "seed", "timestamp"
+        ]
+        df = pd.DataFrame([res], columns=columns)
         
         # Append if exists, else write header
         if os.path.exists(csv_path):
