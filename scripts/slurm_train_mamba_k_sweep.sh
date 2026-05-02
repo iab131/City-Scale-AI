@@ -13,7 +13,7 @@ whoami
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 
 # TODO: Change this to your repository's path on Skynet
-cd ~/City-Scale-AI
+cd ~/Mamba
 mkdir -p logs
 
 # TODO: Change this to the path of your virtual environment on Skynet
