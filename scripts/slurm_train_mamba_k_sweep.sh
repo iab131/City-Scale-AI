@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 #SBATCH --job-name=mamba_k_sweep
 #SBATCH --mem=20G
 #SBATCH --gres=gpu:1
@@ -16,7 +17,8 @@ cd ~/City-Scale-AI
 mkdir -p logs
 
 # TODO: Change this to the path of your virtual environment on Skynet
-source ~/venvs/mamba311/bin/activate
+ssource ~/miniconda3/bin/activate
+conda activate mamba310
 
 python -c "import torch; print('torch:', torch.__version__); print('cuda:', torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
 
