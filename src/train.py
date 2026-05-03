@@ -50,7 +50,7 @@ def run_training(config_override=None):
     
     # 1-4. Preprocess data (loading, normalizing, building graph, GFT transform)
     try:
-        mean, std, L, evals, U, X_hat = get_cached_gft_data(
+        mean, std, L, evals, U, X_hat, X_raw = get_cached_gft_data(
             config.data_path, config.adj_path, config.k, cache_dir="cache/gft"
         )
     except FileNotFoundError as e:

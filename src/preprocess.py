@@ -11,12 +11,12 @@ def get_cached_gft_data(data_path, adj_path, k, cache_dir="cache/gft"):
     """
     os.makedirs(cache_dir, exist_ok=True)
     
-    mean_path = os.path.join(cache_dir, "mean.npy")
-    std_path = os.path.join(cache_dir, "std.npy")
-    L_path = os.path.join(cache_dir, "L.npy")
-    evals_path = os.path.join(cache_dir, f"evals_k{k}.npy")
-    U_path = os.path.join(cache_dir, f"U_k{k}.npy")
-    X_hat_path = os.path.join(cache_dir, f"X_hat_k{k}.npy")
+    mean_path = os.path.join(cache_dir, "mean_train.npy")
+    std_path = os.path.join(cache_dir, "std_train.npy")
+    L_path = os.path.join(cache_dir, "L_train.npy")
+    evals_path = os.path.join(cache_dir, f"evals_k{k}_train.npy")
+    U_path = os.path.join(cache_dir, f"U_k{k}_train.npy")
+    X_hat_path = os.path.join(cache_dir, f"X_hat_k{k}_train.npy")
     
     # Check if all files for this k exist
     if (os.path.exists(mean_path) and os.path.exists(std_path) and 
@@ -30,20 +30,23 @@ def get_cached_gft_data(data_path, adj_path, k, cache_dir="cache/gft"):
         evals = np.load(evals_path)
         U = np.load(U_path)
         X_hat = np.load(X_hat_path)
-        return mean, std, L, evals, U, X_hat
+        X = load_metr_la_h5(data_path)
+        return mean, std, L, evals, U, X_hat, X
         
     print(f"Computing and saving new GFT artifacts for k={k}...")
     # Load raw data if needed
     X = load_metr_la_h5(data_path)
     _, _, A = load_adj_pkl(adj_path)
     
-    # Compute mean and std if not cached
+    # Compute mean and std on train set only (70%)
     if os.path.exists(mean_path) and os.path.exists(std_path):
         mean = np.load(mean_path)
         std = np.load(std_path)
     else:
-        mean = X.mean(axis=0, keepdims=True)
-        std = X.std(axis=0, keepdims=True) + 1e-6
+        n_train = int(0.7 * len(X))
+        X_train = X[:n_train]
+        mean = X_train.mean(axis=0, keepdims=True)
+        std = X_train.std(axis=0, keepdims=True) + 1e-6
         np.save(mean_path, mean)
         np.save(std_path, std)
         
@@ -66,4 +69,4 @@ def get_cached_gft_data(data_path, adj_path, k, cache_dir="cache/gft"):
     X_hat = gft(X_norm, U)
     np.save(X_hat_path, X_hat)
     
-    return mean, std, L, evals, U, X_hat
+    return mean, std, L, evals, U, X_hat, X

@@ -17,10 +17,15 @@ cd ~/Mamba
 mkdir -p logs
 
 # TODO: Change this to the path of your virtual environment on Skynet
-ssource ~/miniconda3/bin/activate
+source ~/miniconda3/bin/activate
 conda activate mamba310
 
 python -c "import torch; print('torch:', torch.__version__); print('cuda:', torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
+#python -m pip install --upgrade pip setuptools wheel packaging ninja numpy
+#python -m pip install --no-build-isolation causal-conv1d
+#python -m pip install --no-build-isolation mamba-ssm
+
+python -c "import mamba_ssm; print('mamba_ssm ok')"
 
 bash scripts/run_mamba_k_sweep.sh
 

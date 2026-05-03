@@ -14,7 +14,6 @@ sys.path.append(os.path.join(root_dir, 'src'))
 
 from src.dataset import SpectralTrafficDataset
 from src.preprocess import get_cached_gft_data
-from src.train import compute_metrics
 from models.mamba_model import SpectralMambaReal
 
 def parse_args():
@@ -29,6 +28,45 @@ def parse_args():
     parser.add_argument('--learning_rate', type=float, default=0.001, help='Learning rate')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     return parser.parse_args()
+
+import numpy as np
+
+def masked_mae_loss(preds, labels, null_val=0.0):
+    if np.isnan(null_val):
+        mask = ~torch.isnan(labels)
+    else:
+        mask = (labels != null_val)
+    mask = mask.float()
+    mask /= torch.mean(mask)
+    mask = torch.where(torch.isnan(mask), torch.zeros_like(mask), mask)
+    loss = torch.abs(preds - labels)
+    loss = loss * mask
+    loss = torch.where(torch.isnan(loss), torch.zeros_like(loss), loss)
+    return torch.mean(loss)
+
+def compute_metrics(preds, labels, null_val=0.0):
+    if np.isnan(null_val):
+        mask = ~torch.isnan(labels)
+    else:
+        mask = (labels != null_val)
+    mask = mask.float()
+    mask /= torch.mean(mask)
+    mask = torch.where(torch.isnan(mask), torch.zeros_like(mask), mask)
+    
+    mae = torch.abs(preds - labels) * mask
+    mae = torch.where(torch.isnan(mae), torch.zeros_like(mae), mae)
+    mae = torch.mean(mae)
+    
+    # Add a small epsilon to avoid division by zero for valid labels that are very small
+    mape = torch.abs((preds - labels) / torch.clamp(labels, min=1e-4)) * mask
+    mape = torch.where(torch.isnan(mape), torch.zeros_like(mape), mape)
+    mape = torch.mean(mape)
+    
+    rmse = torch.square(preds - labels) * mask
+    rmse = torch.where(torch.isnan(rmse), torch.zeros_like(rmse), rmse)
+    rmse = torch.sqrt(torch.mean(rmse))
+    
+    return mae.item(), rmse.item(), mape.item()
 
 class Config:
     input_len = 12
@@ -47,7 +85,7 @@ class Config:
     patience = 10
     gradient_clip = 5.0
     use_amp = True
-    
+
     data_path = "data/METR-LA.h5"
     adj_path = "data/adj_METR-LA.pkl"
     checkpoint_dir = "results/mamba/checkpoints"
@@ -57,7 +95,7 @@ def run_mamba_training(config, args):
     import random
     import numpy as np
     import datetime
-    
+
     # Set seed
     if hasattr(args, 'seed'):
         torch.manual_seed(args.seed)
@@ -65,12 +103,12 @@ def run_mamba_training(config, args):
         random.seed(args.seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(args.seed)
-            
+
     config.checkpoint_dir = "results/mamba/k_sweep/checkpoints"
     config.results_dir = "results/mamba/k_sweep"
     os.makedirs(config.checkpoint_dir, exist_ok=True)
     os.makedirs(config.results_dir, exist_ok=True)
-    
+
     # Device configuration
     if args.device == 'cuda' and torch.cuda.is_available():
         device = torch.device('cuda')
@@ -84,7 +122,7 @@ def run_mamba_training(config, args):
         print("Device selected: CPU")
 
     try:
-        mean, std, L, evals, U, X_hat = get_cached_gft_data(
+        mean, std, L, evals, U, X_hat, X_raw = get_cached_gft_data(
             config.data_path, config.adj_path, config.k, cache_dir="cache/gft"
         )
     except FileNotFoundError as e:
@@ -100,9 +138,13 @@ def run_mamba_training(config, args):
     X_val = X_hat[n_train:n_train + n_val]
     X_test = X_hat[n_train + n_val:]
 
-    train_ds = SpectralTrafficDataset(X_train, input_len=config.input_len, pred_len=config.pred_len)
-    val_ds = SpectralTrafficDataset(X_val, input_len=config.input_len, pred_len=config.pred_len)
-    test_ds = SpectralTrafficDataset(X_test, input_len=config.input_len, pred_len=config.pred_len)
+    X_raw_train = X_raw[:n_train]
+    X_raw_val = X_raw[n_train:n_train + n_val]
+    X_raw_test = X_raw[n_train + n_val:]
+
+    train_ds = SpectralTrafficDataset(X_train, X_node=X_raw_train, input_len=config.input_len, pred_len=config.pred_len)
+    val_ds = SpectralTrafficDataset(X_val, X_node=X_raw_val, input_len=config.input_len, pred_len=config.pred_len)
+    test_ds = SpectralTrafficDataset(X_test, X_node=X_raw_test, input_len=config.input_len, pred_len=config.pred_len)
 
     train_loader = DataLoader(train_ds, batch_size=config.batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=config.batch_size, shuffle=False)
@@ -110,9 +152,9 @@ def run_mamba_training(config, args):
 
     try:
         model = SpectralMambaReal(
-            k=config.k, 
-            pred_len=config.pred_len, 
-            d_model=config.d_model, 
+            k=config.k,
+            pred_len=config.pred_len,
+            d_model=config.d_model,
             num_layers=config.num_layers,
             d_state=config.d_state,
             d_conv=config.d_conv,
@@ -122,82 +164,92 @@ def run_mamba_training(config, args):
     except ImportError as e:
         print(f"FAILED TO LOAD MODEL: {e}")
         return None
-        
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
     loss_fn = nn.L1Loss()
-    
+
     scaler = torch.cuda.amp.GradScaler(enabled=(config.use_amp and device.type == 'cuda'))
 
     U_t = torch.tensor(U.T, dtype=torch.float32, device=device)
     mean_t = torch.tensor(mean, dtype=torch.float32, device=device)
     std_t = torch.tensor(std, dtype=torch.float32, device=device)
-    
+
     def evaluate(loader):
         model.eval()
-        total_mae, total_rmse, total_mape = 0.0, 0.0, 0.0
-        batches = 0
+        preds_list = []
+        labels_list = []
         with torch.no_grad():
-            for xb, yb in loader:
-                xb, yb = xb.to(device), yb.to(device)
-                
+            for xb, yb_node in loader:
+                xb, yb_node = xb.to(device), yb_node.to(device)
+
                 with torch.cuda.amp.autocast(enabled=(config.use_amp and device.type == 'cuda')):
                     pred_hat = model(xb)
+
+                pred_node = torch.matmul(pred_hat.float(), U_t) * std_t + mean_t
+                preds_list.append(pred_node.cpu())
+                labels_list.append(yb_node.cpu())
+
+        preds = torch.cat(preds_list, dim=0)
+        labels = torch.cat(labels_list, dim=0)
+        
+        metrics = {}
+        mae, rmse, mape = compute_metrics(preds, labels)
+        metrics['avg_mae'] = mae
+        metrics['avg_rmse'] = rmse
+        metrics['avg_mape'] = mape
+        
+        for t, m in [(2, 15), (5, 30), (11, 60)]:
+            if preds.shape[1] > t:
+                mae_t, rmse_t, mape_t = compute_metrics(preds[:, t:t+1, :], labels[:, t:t+1, :])
+                metrics[f'mae_{m}'] = mae_t
+                metrics[f'rmse_{m}'] = rmse_t
+                metrics[f'mape_{m}'] = mape_t
+            else:
+                metrics[f'mae_{m}'] = 0.0
+                metrics[f'rmse_{m}'] = 0.0
+                metrics[f'mape_{m}'] = 0.0
                 
-                pred_rec_norm = torch.matmul(pred_hat.float(), U_t)
-                y_rec_norm = torch.matmul(yb.float(), U_t)
-                
-                pred_node = pred_rec_norm * std_t + mean_t
-                y_node = y_rec_norm * std_t + mean_t
-                
-                mae, rmse, mape = compute_metrics(pred_node, y_node)
-                total_mae += mae
-                total_rmse += rmse
-                total_mape += mape
-                batches += 1
-                
-        if batches == 0: return 0.0, 0.0, 0.0
-        return total_mae / batches, total_rmse / batches, total_mape / batches
+        return metrics
 
     print(f"Starting Mamba training for {config.epochs} epochs...")
     best_val_mae = float('inf')
-    best_val_rmse = float('inf')
-    best_val_mape = float('inf')
     epochs_no_improve = 0
     checkpoint_path = os.path.join(config.checkpoint_dir, f"best_mamba_k_{config.k}.pth")
-    
+
     start_time = time.time()
     for epoch in range(config.epochs):
         model.train()
         train_loss = 0.0
-        
-        for xb, yb in train_loader:
-            xb, yb = xb.to(device), yb.to(device)
+
+        for xb, yb_node in train_loader:
+            xb, yb_node = xb.to(device), yb_node.to(device)
             optimizer.zero_grad()
-            
+
             with torch.cuda.amp.autocast(enabled=(config.use_amp and device.type == 'cuda')):
-                pred = model(xb)
-                loss = loss_fn(pred, yb)
-                
+                pred_hat = model(xb)
+                pred_node = torch.matmul(pred_hat.float(), U_t) * std_t + mean_t
+                loss = masked_mae_loss(pred_node, yb_node, null_val=0.0)
+
             scaler.scale(loss).backward()
-            
+
             if config.gradient_clip > 0:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config.gradient_clip)
-                
+
             scaler.step(optimizer)
             scaler.update()
-            
+
             train_loss += loss.item()
 
         train_loss /= max(len(train_loader), 1)
-        val_mae, val_rmse, val_mape = evaluate(val_loader)
-        
-        print(f"Epoch {epoch+1:02d}/{config.epochs} | Train L1: {train_loss:.4f} | Val MAE: {val_mae:.4f} | Val RMSE: {val_rmse:.4f} | Val MAPE: {val_mape:.4f}")
-        
+        val_metrics = evaluate(val_loader)
+        val_mae = val_metrics['avg_mae']
+
+        print(f"Epoch {epoch+1:02d}/{config.epochs} | Train L1 (node): {train_loss:.4f} | Val MAE: {val_mae:.4f} | Val RMSE: {val_metrics['avg_rmse']:.4f} | Val MAPE: {val_metrics['avg_mape']:.4f}")
+
         if val_mae < best_val_mae:
             best_val_mae = val_mae
-            best_val_rmse = val_rmse
-            best_val_mape = val_mape
+            best_val_metrics = val_metrics
             torch.save(model.state_dict(), checkpoint_path)
             epochs_no_improve = 0
             print("  -> Saved new best model!")
@@ -206,7 +258,7 @@ def run_mamba_training(config, args):
             if epochs_no_improve >= config.patience:
                 print(f"Early stopping triggered after {epoch+1} epochs.")
                 break
-                
+
         # Optional: clear cache to free up fragmented memory (not recommended every batch)
         if device.type == 'cuda':
             torch.cuda.empty_cache()
@@ -215,33 +267,46 @@ def run_mamba_training(config, args):
 
     if os.path.exists(checkpoint_path):
         model.load_state_dict(torch.load(checkpoint_path, map_location=device))
-    test_mae, test_rmse, test_mape = evaluate(test_loader)
-    print(f"\nFinal Test - MAE: {test_mae:.4f} | RMSE: {test_rmse:.4f} | MAPE: {test_mape:.4f}")
-    
-    return {
+    test_metrics = evaluate(test_loader)
+    print(f"\nFinal Test - Avg MAE: {test_metrics['avg_mae']:.4f} | Avg RMSE: {test_metrics['avg_rmse']:.4f} | Avg MAPE: {test_metrics['avg_mape']:.4f}")
+
+    res_dict = {
+        "model_name": "SpectralMambaReal",
         "k": config.k,
-        "best_val_mae": best_val_mae,
-        "best_val_rmse": best_val_rmse,
-        "best_val_mape": best_val_mape,
-        "test_mae": test_mae,
-        "test_rmse": test_rmse,
-        "test_mape": test_mape,
+        "d_model": config.d_model,
+        "num_layers": config.num_layers,
+        "seed": args.seed if hasattr(args, 'seed') else None,
+        
+        "mae_15": test_metrics.get('mae_15', 0.0),
+        "rmse_15": test_metrics.get('rmse_15', 0.0),
+        "mape_15": test_metrics.get('mape_15', 0.0),
+        
+        "mae_30": test_metrics.get('mae_30', 0.0),
+        "rmse_30": test_metrics.get('rmse_30', 0.0),
+        "mape_30": test_metrics.get('mape_30', 0.0),
+        
+        "mae_60": test_metrics.get('mae_60', 0.0),
+        "rmse_60": test_metrics.get('rmse_60', 0.0),
+        "mape_60": test_metrics.get('mape_60', 0.0),
+        
+        "avg_mae": test_metrics.get('avg_mae', 0.0),
+        "avg_rmse": test_metrics.get('avg_rmse', 0.0),
+        "avg_mape": test_metrics.get('avg_mape', 0.0),
+        
         "time_sec": round(end_time - start_time, 2),
         "device": device.type,
         "gpu_name": torch.cuda.get_device_name(0) if device.type == 'cuda' else None,
-        "model_name": "SpectralMambaReal",
-        "d_model": config.d_model,
-        "num_layers": config.num_layers,
         "batch_size": config.batch_size,
         "learning_rate": config.learning_rate,
         "epochs_completed": epoch + 1,
-        "seed": args.seed if hasattr(args, 'seed') else None,
         "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
+    
+    return res_dict
 
 def main():
     args = parse_args()
-    
+
     config = Config()
     config.epochs = args.epochs
     config.batch_size = args.batch_size
@@ -251,28 +316,30 @@ def main():
     config.learning_rate = args.learning_rate
     # In a real setup we'd parse configs/mamba.yaml here if args.config is set.
     # For simplicity, using the Config class above with overrides from args.
-    
+
     res = run_mamba_training(config, args)
-    
+
     if res is not None:
         out_dir = config.results_dir
         csv_path = os.path.join(out_dir, "mamba_k_sweep_results.csv")
         # Ensure we always have all columns in order
         columns = [
-            "k", "best_val_mae", "best_val_rmse", "best_val_mape", 
-            "test_mae", "test_rmse", "test_mape", "time_sec", 
-            "device", "gpu_name", "model_name", "d_model", 
-            "num_layers", "batch_size", "learning_rate", 
-            "epochs_completed", "seed", "timestamp"
+            "model_name", "k", "d_model", "num_layers", "seed",
+            "mae_15", "rmse_15", "mape_15", 
+            "mae_30", "rmse_30", "mape_30", 
+            "mae_60", "rmse_60", "mape_60", 
+            "avg_mae", "avg_rmse", "avg_mape", 
+            "time_sec", "device", "gpu_name", 
+            "batch_size", "learning_rate", "epochs_completed", "timestamp"
         ]
         df = pd.DataFrame([res], columns=columns)
-        
+
         # Append if exists, else write header
         if os.path.exists(csv_path):
             df.to_csv(csv_path, mode='a', header=False, index=False)
         else:
             df.to_csv(csv_path, index=False)
-            
+
         print(f"\nResults successfully saved to {csv_path}")
 
 if __name__ == "__main__":
