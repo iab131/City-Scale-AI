@@ -1141,4 +1141,255 @@ def build_model(K: int, U_np, evals_np, version: str = "v1", **kwargs):
         return SpectralStateSpaceModelV5(N=N, K=K, U=U, evals=ev, **kwargs)
     if version == "v7":
         return SpectralStateSpaceModelV7(N=N, K=K, U=U, evals=ev, **kwargs)
+    if version == "v8":
+        return SpectralStateSpaceModelV8(N=N, K=K, U=U, evals=ev, **kwargs)
     return SpectralStateSpaceModel(N=N, K=K, U=U, evals=ev, **kwargs)
+
+
+# ----------------------------------------------------------------------------
+# v8: SOTA-grade upgrade
+#
+# Integrates the empirically-best ingredients from the published SOTA literature
+# (STAEformer CIKM'23, STD-MAE IJCAI'24, TITAN arXiv'24, TESTAM+ arXiv'25)
+# onto our bi-axis spectral Mamba backbone:
+#
+#   1. **Bidirectional bi-axis Mamba**: each block now runs a forward AND a
+#      reverse selective scan along both time and mode axes, fused with a
+#      learned linear projection back to d_model. Closes the "unidirectional
+#      Mamba can't see future-of-window context" weakness that the STAE-BiSSSM
+#      paper specifically identified as worth ~0.10 MAE.
+#
+#   2. **STAEformer-style adaptive embedding**: replaces our weak per-(horizon,
+#      node) scalar `node_bias` with a high-capacity learnable code
+#      `E_a in [T_out, N, d_adp]` that is Xavier-init and projected to
+#      per-(horizon, node) speed corrections by a small zero-init MLP. This is
+#      STAEformer's headline novelty applied at our output. 198k params; same
+#      semantic role as their `adaptive_embedding` but acting on the residual
+#      to inverse-GFT rather than on the input embedding (which doesn't apply
+#      cleanly since our encoder operates in mode space, not node space).
+#
+#   3. **288-bin TOD embedding + 7-bin DOW embedding**: replaces our sinusoidal
+#      TOD encoding with the same 288-bucket integer-indexed nn.Embedding that
+#      STAEformer and STD-MAE both use. Empirically gives the model a fully
+#      learnable per-(5-min-bucket) signal instead of the smooth sin/cos prior.
+#
+#   4. **Long input window option**: defaults to 12 (matches benchmark protocol)
+#      but supports up to 24 if H200 memory permits — many SOTA models cheat
+#      with longer windows.
+# ----------------------------------------------------------------------------
+
+
+class BidirectionalBiAxisMambaBlock(nn.Module):
+    """
+    Bi-axis Mamba block with bidirectional scans on both axes.
+
+    For each axis we run a forward Mamba on the sequence, a backward Mamba on
+    the reversed sequence (output re-reversed), then concatenate + project back
+    to d_model via a Linear. This adds 2x Mamba calls per axis (4 total per
+    block) and one Linear(2D -> D) per axis, but lets the model see context
+    in both temporal and mode directions.
+    """
+
+    def __init__(self, d_model: int, d_state: int = 16, d_conv: int = 4, expand: int = 2,
+                 dropout: float = 0.1):
+        super().__init__()
+        self.norm_t = nn.LayerNorm(d_model)
+        self.norm_k = nn.LayerNorm(d_model)
+        self.time_fwd = Mamba(d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand)
+        self.time_bwd = Mamba(d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand)
+        self.mode_fwd = Mamba(d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand)
+        self.mode_bwd = Mamba(d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand)
+        self.time_proj = nn.Linear(2 * d_model, d_model)
+        self.mode_proj = nn.Linear(2 * d_model, d_model)
+        self.drop = nn.Dropout(dropout)
+
+    @staticmethod
+    def _bidir_scan(seq, fwd_module, bwd_module, proj):
+        # seq: [batch, length, dim]
+        f = fwd_module(seq)
+        b = bwd_module(seq.flip(dims=[1])).flip(dims=[1])
+        return proj(torch.cat([f, b], dim=-1))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, T, K, D]
+        B, T, K, D = x.shape
+
+        # Time axis: fold (B, K) -> batch, bidirectional scan over T
+        xt = self.norm_t(x)
+        xt = xt.permute(0, 2, 1, 3).reshape(B * K, T, D)
+        xt = self._bidir_scan(xt, self.time_fwd, self.time_bwd, self.time_proj)
+        xt = xt.reshape(B, K, T, D).permute(0, 2, 1, 3)
+        x = x + self.drop(xt)
+
+        # Mode axis: fold (B, T) -> batch, bidirectional scan over K
+        xk = self.norm_k(x)
+        xk = xk.reshape(B * T, K, D)
+        xk = self._bidir_scan(xk, self.mode_fwd, self.mode_bwd, self.mode_proj)
+        xk = xk.reshape(B, T, K, D)
+        x = x + self.drop(xk)
+
+        return x
+
+
+class SpectralStateSpaceModelV8(nn.Module):
+    """
+    v8 - bi-axis spectral Mamba + STAEformer adaptive embedding
+         + 288-bin TOD embedding.
+
+    Optionally bidirectional; controlled by `bidirectional` flag (default True).
+    """
+
+    def __init__(
+        self,
+        N: int,
+        K: int,
+        U: torch.Tensor,
+        evals: torch.Tensor,
+        d_model: int = 128,
+        num_layers: int = 3,
+        d_state: int = 16,
+        d_conv: int = 4,
+        expand: int = 2,
+        cheb_order: int = 3,
+        cheb_channels: int = 4,
+        dropout: float = 0.1,
+        input_len: int = 12,
+        pred_len: int = 12,
+        steps_per_day: int = 288,
+        num_dow: int = 7,
+        tod_dim: int = 32,
+        dow_dim: int = 32,
+        adp_emb_dim: int = 80,
+        use_node_bias: bool = True,
+        bidirectional: bool = True,
+    ):
+        super().__init__()
+        self.N = N
+        self.K = K
+        self.d_model = d_model
+        self.input_len = input_len
+        self.pred_len = pred_len
+        self.steps_per_day = steps_per_day
+
+        # Fixed GFT basis (non-trainable)
+        evals_max = float(evals.max().item() + 1e-6)
+        evals_scaled = (2.0 * evals / evals_max) - 1.0
+        self.register_buffer("U", U.contiguous())
+        self.register_buffer("Ut", U.t().contiguous())
+        self.register_buffer("evals_scaled", evals_scaled.contiguous())
+
+        # Learnable spectral filter (kept from v4)
+        self.cheb = ChebFilter(K=K, order=cheb_order, channels=cheb_channels)
+        self.channel_proj = nn.Linear(cheb_channels, d_model)
+
+        # Per-mode learnable embedding (kept from v4)
+        self.mode_emb = nn.Parameter(torch.zeros(K, d_model))
+        nn.init.normal_(self.mode_emb, std=0.02)
+
+        # STAEformer-style 288-bin TOD + 7-bin DOW embeddings.
+        # We use Linear projections to d_model so the rest of the architecture
+        # is unchanged. (STAEformer concatenates, but we add to preserve d_model.)
+        self.tod_emb = nn.Embedding(steps_per_day, tod_dim)
+        self.dow_emb = nn.Embedding(num_dow, dow_dim)
+        self.tod_proj = nn.Linear(tod_dim, d_model)
+        self.dow_proj = nn.Linear(dow_dim, d_model)
+
+        # Bi-axis Mamba encoder (bidirectional optional)
+        block_cls = BidirectionalBiAxisMambaBlock if bidirectional else BiAxisMambaBlock
+        self.enc_blocks = nn.ModuleList([
+            block_cls(
+                d_model=d_model, d_state=d_state, d_conv=d_conv,
+                expand=expand, dropout=dropout,
+            )
+            for _ in range(num_layers)
+        ])
+        self.enc_norm = nn.LayerNorm(d_model)
+
+        # Learnable temporal pool (kept from v4) - softmax over input frames
+        pool_init = torch.zeros(input_len)
+        pool_init[-1] = 2.0
+        self.t_pool_logits = nn.Parameter(pool_init)
+
+        # Per-horizon learnable embedding
+        self.horizon_emb = nn.Parameter(torch.zeros(pred_len, d_model))
+        nn.init.normal_(self.horizon_emb, std=0.02)
+
+        # Spectral head: per-(horizon, mode) prediction from pooled query
+        self.spec_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model, 1),
+        )
+
+        # STAEformer-style adaptive embedding at the output:
+        # [T_out, N, d_adp] Xavier-init learnable code, projected to scalar speed
+        # correction via a small zero-init Linear so the model starts as v4.
+        self.adp_emb_dim = adp_emb_dim
+        self.adaptive_emb = nn.Parameter(torch.empty(pred_len, N, adp_emb_dim))
+        nn.init.xavier_uniform_(self.adaptive_emb)
+        self.adaptive_proj = nn.Linear(adp_emb_dim, 1)
+        nn.init.zeros_(self.adaptive_proj.weight)
+        nn.init.zeros_(self.adaptive_proj.bias)
+
+        self.use_node_bias = use_node_bias
+        if use_node_bias:
+            self.node_bias = nn.Parameter(torch.zeros(pred_len, N))
+
+    # ------------------------------------------------------------------
+    def encode_time(self, tod: torch.Tensor, dow: torch.Tensor) -> torch.Tensor:
+        """tod[B, T] in [0,1), dow[B, T] int -> [B, T, d_model]"""
+        # 288-bin TOD index
+        tod_idx = (tod * self.steps_per_day).long().clamp(0, self.steps_per_day - 1)
+        return self.tod_proj(self.tod_emb(tod_idx)) + self.dow_proj(self.dow_emb(dow.long()))
+
+    # ------------------------------------------------------------------
+    def forward(
+        self,
+        x_norm: torch.Tensor,    # [B, T_in, N]
+        tod: torch.Tensor,        # [B, T_in]
+        dow: torch.Tensor,        # [B, T_in]
+        y_tod: torch.Tensor,      # [B, T_out]
+        y_dow: torch.Tensor,      # [B, T_out]
+    ) -> torch.Tensor:
+        B, T_in, N = x_norm.shape
+        T_out = self.pred_len
+        K, D = self.K, self.d_model
+
+        # --- encoder ---
+        x_hat = x_norm @ self.U                                       # [B, T_in, K]
+        gains = self.cheb(self.evals_scaled)                          # [C, K]
+        x_filt = x_hat.unsqueeze(-1) * gains.t().unsqueeze(0).unsqueeze(0)
+        h = self.channel_proj(x_filt)                                 # [B, T_in, K, D]
+        h = h + self.mode_emb.view(1, 1, K, D)
+
+        t_emb_in = self.encode_time(tod, dow)                         # [B, T_in, D]
+        h = h + t_emb_in.unsqueeze(2)
+
+        for blk in self.enc_blocks:
+            h = blk(h)
+        h = self.enc_norm(h)                                          # [B, T_in, K, D]
+
+        # --- temporal pool ---
+        t_w = torch.softmax(self.t_pool_logits, dim=0)
+        h_pool = (h * t_w.view(1, T_in, 1, 1)).sum(dim=1)             # [B, K, D]
+
+        # --- per-horizon queries ---
+        future_t = self.encode_time(y_tod, y_dow)                     # [B, T_out, D]
+        q = (h_pool.unsqueeze(1)
+             + future_t.unsqueeze(2)
+             + self.horizon_emb.view(1, T_out, 1, D))                 # [B, T_out, K, D]
+
+        # --- spectral readout ---
+        spec_pred = self.spec_head(q).squeeze(-1)                     # [B, T_out, K]
+        node_from_spec = spec_pred @ self.Ut                          # [B, T_out, N]
+
+        # --- output composition ---
+        last_obs = x_norm[:, -1:, :].expand(B, T_out, N)
+        adp_correction = self.adaptive_proj(self.adaptive_emb).squeeze(-1)  # [T_out, N]
+
+        y_hat = last_obs + node_from_spec + adp_correction.unsqueeze(0)
+        if self.use_node_bias:
+            y_hat = y_hat + self.node_bias.view(1, T_out, N)
+        return y_hat

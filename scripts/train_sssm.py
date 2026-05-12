@@ -56,8 +56,12 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42)
 
     # Model
-    p.add_argument("--version", type=str, default="v1", choices=["v1", "v2", "v3", "v4", "v5"])
+    p.add_argument("--version", type=str, default="v1", choices=["v1", "v2", "v3", "v4", "v5", "v8"])
     p.add_argument("--no_residualize", action="store_true", help="v5: disable residualized input")
+    p.add_argument("--adp_emb_dim", type=int, default=80, help="v8: adaptive embedding dimension")
+    p.add_argument("--tod_dim", type=int, default=32, help="v8: TOD embedding dimension")
+    p.add_argument("--dow_dim", type=int, default=32, help="v8: DOW embedding dimension")
+    p.add_argument("--unidirectional", action="store_true", help="v8: use unidirectional Mamba (faster)")
     p.add_argument("--n_heads", type=int, default=4, help="v3 only")
     p.add_argument("--k", type=int, default=207)
     p.add_argument("--d_model", type=int, default=96)
@@ -232,6 +236,12 @@ def main():
     elif args.version == "v5":
         model_kwargs["use_node_bias"] = not args.no_node_bias
         model_kwargs["residualize_input"] = not args.no_residualize
+    elif args.version == "v8":
+        model_kwargs["use_node_bias"] = not args.no_node_bias
+        model_kwargs["adp_emb_dim"] = args.adp_emb_dim
+        model_kwargs["tod_dim"] = args.tod_dim
+        model_kwargs["dow_dim"] = args.dow_dim
+        model_kwargs["bidirectional"] = not args.unidirectional
     model = build_model(
         K=args.k, U_np=U, evals_np=evals,
         version=args.version, **model_kwargs,
@@ -243,7 +253,12 @@ def main():
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.learning_rate,
                             weight_decay=args.weight_decay)
-    scaler = torch.amp.GradScaler('cuda', enabled=(args.use_amp and device.type == "cuda"))
+    # bf16 has the same exponent range as fp32 -> no overflow, no need for GradScaler.
+    # We keep GradScaler disabled when AMP is bf16, enabled only when AMP is fp16.
+    amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    use_scaler = args.use_amp and device.type == "cuda" and amp_dtype == torch.float16
+    scaler = torch.amp.GradScaler('cuda', enabled=use_scaler)
+    print(f"[amp] use_amp={args.use_amp} dtype={amp_dtype} scaler_enabled={use_scaler}")
 
     mean_t = torch.tensor(mean, device=device)
     std_t = torch.tensor(std, device=device)
@@ -279,12 +294,12 @@ def main():
             y_dow = batch["y_dow"].to(device, non_blocking=True)
 
             opt.zero_grad(set_to_none=True)
-            with torch.amp.autocast('cuda', enabled=(args.use_amp and device.type == "cuda")):
+            with torch.amp.autocast('cuda', dtype=amp_dtype, enabled=(args.use_amp and device.type == "cuda")):
                 if args.version == "v5":
                     pn_in = batch["prior_norm_in"].to(device, non_blocking=True)
                     pn_out = batch["prior_norm_out"].to(device, non_blocking=True)
                     y_pred_norm = model(x_norm, tod_b, dow_b, y_tod, y_dow, pn_in, pn_out)
-                elif args.version in ("v2", "v3", "v4"):
+                elif args.version in ("v2", "v3", "v4", "v8"):
                     y_pred_norm = model(x_norm, tod_b, dow_b, y_tod, y_dow)
                 else:
                     y_pred_norm = model(x_norm, tod_b, dow_b)
@@ -315,12 +330,12 @@ def main():
                 y_mask = batch["y_mask"].to(device, non_blocking=True)
                 y_tod = batch["y_tod"].to(device, non_blocking=True)
                 y_dow = batch["y_dow"].to(device, non_blocking=True)
-                with torch.amp.autocast('cuda', enabled=(args.use_amp and device.type == "cuda")):
+                with torch.amp.autocast('cuda', dtype=amp_dtype, enabled=(args.use_amp and device.type == "cuda")):
                     if args.version == "v5":
                         pn_in_v = batch["prior_norm_in"].to(device, non_blocking=True)
                         pn_out_v = batch["prior_norm_out"].to(device, non_blocking=True)
                         y_pred_norm = model(x_norm, tod_b, dow_b, y_tod, y_dow, pn_in_v, pn_out_v)
-                    elif args.version in ("v2", "v3", "v4"):
+                    elif args.version in ("v2", "v3", "v4", "v8"):
                         y_pred_norm = model(x_norm, tod_b, dow_b, y_tod, y_dow)
                     else:
                         y_pred_norm = model(x_norm, tod_b, dow_b)
@@ -367,12 +382,12 @@ def main():
             y_mask = batch["y_mask"].to(device, non_blocking=True)
             y_tod = batch["y_tod"].to(device, non_blocking=True)
             y_dow = batch["y_dow"].to(device, non_blocking=True)
-            with torch.amp.autocast('cuda', enabled=(args.use_amp and device.type == "cuda")):
+            with torch.amp.autocast('cuda', dtype=amp_dtype, enabled=(args.use_amp and device.type == "cuda")):
                 if args.version == "v5":
                     pn_in = batch["prior_norm_in"].to(device, non_blocking=True)
                     pn_out = batch["prior_norm_out"].to(device, non_blocking=True)
                     y_pred_norm = model(x_norm, tod_b, dow_b, y_tod, y_dow, pn_in, pn_out)
-                elif args.version in ("v2", "v3", "v4"):
+                elif args.version in ("v2", "v3", "v4", "v8"):
                     y_pred_norm = model(x_norm, tod_b, dow_b, y_tod, y_dow)
                 else:
                     y_pred_norm = model(x_norm, tod_b, dow_b)
