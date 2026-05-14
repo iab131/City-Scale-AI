@@ -71,6 +71,19 @@ def parse_args():
     p.add_argument("--use_amp", action="store_true", default=True)
     p.add_argument("--num_workers", type=int, default=4)
 
+    # Tier-S improvements
+    p.add_argument("--horizon_weighted", action="store_true",
+                   help="Use per-horizon weighted loss (heavier on 60-min)")
+    p.add_argument("--horizon_weights", type=float, nargs="+",
+                   default=[1.0, 1.0, 1.0, 1.05, 1.1, 1.15, 1.2, 1.3, 1.4, 1.5, 1.6, 1.8],
+                   help="Per-horizon weights for weighted loss (length must equal out_steps)")
+    p.add_argument("--use_swa", action="store_true",
+                   help="Apply Stochastic Weight Averaging after main training (5 extra epochs)")
+    p.add_argument("--swa_epochs", type=int, default=5,
+                   help="Number of SWA tail epochs at constant lr")
+    p.add_argument("--swa_lr", type=float, default=1e-5,
+                   help="Constant LR for SWA phase (kept low since main training already plateaued)")
+
     return p.parse_args()
 
 
@@ -83,6 +96,23 @@ def set_seed(seed):
 def masked_mae(pred, true, mask, eps=1e-6):
     m_mean = mask.mean().clamp(min=eps)
     return ((pred - true).abs() * mask).mean() / m_mean
+
+
+def horizon_weighted_masked_mae(pred, true, mask, weights, eps=1e-6):
+    """
+    Per-horizon weighted masked MAE.
+    pred, true, mask: [B, T_out, N]
+    weights: [T_out]  -- multiplicative weights per horizon
+
+    Equivalent to masked_mae with each horizon-t loss multiplied by weights[t],
+    then normalized by mean(mask * weights[t]). Keeps the gradient pointing
+    where mass is.
+    """
+    # Expand weights to [1, T_out, 1] for broadcasting
+    w = weights.view(1, -1, 1).to(pred.device)
+    weighted_mask = mask * w
+    wm_mean = weighted_mask.mean().clamp(min=eps)
+    return ((pred - true).abs() * weighted_mask).mean() / wm_mean
 
 
 def masked_rmse(pred, true, mask, eps=1e-6):
@@ -171,6 +201,25 @@ def main():
     scaler = torch.amp.GradScaler('cuda', enabled=use_scaler)
     print(f"[amp] dtype={amp_dtype} scaler_enabled={use_scaler}")
 
+    # Loss configuration
+    if args.horizon_weighted:
+        assert len(args.horizon_weights) == args.out_steps, \
+            f"horizon_weights length {len(args.horizon_weights)} != out_steps {args.out_steps}"
+        h_weights = torch.tensor(args.horizon_weights, dtype=torch.float32)
+        print(f"[loss] horizon_weighted MAE, weights={args.horizon_weights}")
+    else:
+        h_weights = None
+        print(f"[loss] standard masked MAE")
+
+    # SWA setup
+    swa_model = None
+    swa_scheduler = None
+    if args.use_swa:
+        from torch.optim.swa_utils import AveragedModel, SWALR, update_bn
+        swa_model = AveragedModel(model)
+        swa_scheduler = SWALR(opt, swa_lr=args.swa_lr, anneal_epochs=1, anneal_strategy="cos")
+        print(f"[swa] enabled, {args.swa_epochs} tail epochs at lr={args.swa_lr}")
+
     mean_t = torch.tensor(mean, device=device)
     std_t = torch.tensor(std, device=device)
 
@@ -197,7 +246,10 @@ def main():
                                     enabled=(args.use_amp and device.type == "cuda")):
                 y_pred_norm = model(x_norm, tod_b, dow_b)        # [B, T_out, N]
                 y_pred = y_pred_norm * std_t + mean_t            # raw mph
-                loss = masked_mae(y_pred, y_node, y_mask)
+                if h_weights is not None:
+                    loss = horizon_weighted_masked_mae(y_pred, y_node, y_mask, h_weights)
+                else:
+                    loss = masked_mae(y_pred, y_node, y_mask)
 
             if use_scaler:
                 scaler.scale(loss).backward()
@@ -250,6 +302,76 @@ def main():
             if epochs_no_improve >= args.patience:
                 print(f"[early stop] no improvement in {args.patience} epochs")
                 break
+
+    # ---- SWA tail (if enabled) ----
+    swa_ckpt_path = None
+    if args.use_swa and swa_model is not None:
+        from torch.optim.swa_utils import update_bn
+        print(f"[swa] starting SWA tail: {args.swa_epochs} epochs at lr={args.swa_lr}")
+        # Load best checkpoint as starting point
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model"])
+        # Rebuild SWA model from the best checkpoint
+        swa_model = torch.optim.swa_utils.AveragedModel(model)
+        # Set constant low lr for SWA
+        for g in opt.param_groups:
+            g["lr"] = args.swa_lr
+        for swa_epoch in range(args.swa_epochs):
+            model.train()
+            running = 0.0; nb = 0
+            for batch in tr_loader:
+                x_norm = batch["x_norm"].to(device, non_blocking=True)
+                tod_b = batch["tod"].to(device, non_blocking=True)
+                dow_b = batch["dow"].to(device, non_blocking=True)
+                y_node = batch["y_node"].to(device, non_blocking=True)
+                y_mask = batch["y_mask"].to(device, non_blocking=True)
+                opt.zero_grad(set_to_none=True)
+                with torch.amp.autocast('cuda', dtype=amp_dtype,
+                                        enabled=(args.use_amp and device.type == "cuda")):
+                    y_pred_norm = model(x_norm, tod_b, dow_b)
+                    y_pred = y_pred_norm * std_t + mean_t
+                    if h_weights is not None:
+                        loss = horizon_weighted_masked_mae(y_pred, y_node, y_mask, h_weights)
+                    else:
+                        loss = masked_mae(y_pred, y_node, y_mask)
+                loss.backward()
+                opt.step()
+                running += float(loss.detach()); nb += 1
+            swa_model.update_parameters(model)
+            print(f"[swa ep {swa_epoch+1}/{args.swa_epochs}] train_loss={running/max(1, nb):.4f}", flush=True)
+        # STAEformer has no BatchNorm, only LayerNorm — update_bn is a no-op but safe to call
+        update_bn(tr_loader, swa_model, device=device)
+
+        # Evaluate SWA model on val
+        swa_model.eval()
+        ap, ay, am = [], [], []
+        with torch.no_grad():
+            for batch in va_loader:
+                x_norm = batch["x_norm"].to(device, non_blocking=True)
+                tod_b = batch["tod"].to(device, non_blocking=True)
+                dow_b = batch["dow"].to(device, non_blocking=True)
+                y_node = batch["y_node"]; y_mask = batch["y_mask"]
+                with torch.amp.autocast('cuda', dtype=amp_dtype,
+                                        enabled=(args.use_amp and device.type == "cuda")):
+                    yn = swa_model(x_norm, tod_b, dow_b)
+                y_pred = yn.float() * std_t + mean_t
+                ap.append(y_pred.cpu()); ay.append(y_node); am.append(y_mask)
+        P = torch.cat(ap); Y = torch.cat(ay); M = torch.cat(am)
+        swa_val_metrics = per_horizon_metrics(P, Y, M)
+        print(f"[swa val] {json.dumps(swa_val_metrics)}")
+
+        # Save SWA model and use it if val is better than best ckpt
+        swa_ckpt_path = os.path.join(out_dir, f"swa_stae_s{args.seed}.pth")
+        torch.save({"model": swa_model.module.state_dict(), "args": vars(args),
+                    "val_metrics": swa_val_metrics, "epoch": -1}, swa_ckpt_path)
+        if swa_val_metrics["avg_mae"] < best_val:
+            print(f"[swa] SWA val ({swa_val_metrics['avg_mae']:.4f}) BEATS pre-SWA best "
+                  f"({best_val:.4f}) — using SWA model for test")
+            ckpt_path = swa_ckpt_path  # use SWA ckpt for final test
+            best_val = swa_val_metrics["avg_mae"]
+        else:
+            print(f"[swa] SWA val ({swa_val_metrics['avg_mae']:.4f}) does NOT beat pre-SWA best "
+                  f"({best_val:.4f}) — keeping pre-SWA ckpt for test, SWA saved separately")
 
     # Test
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)

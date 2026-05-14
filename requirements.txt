@@ -1,13 +1,21 @@
-torch
-torchvision
-torchaudio
+# Active pipeline dependencies (the 3.283 ensemble reproduction).
+# Version pins are the exact set used to produce the reported result on H200 + CUDA 12.4.
+
+# Core deep-learning stack
+torch==2.4.1                       # CUDA 12.4 build recommended
+transformers<4.45                  # mamba-ssm 2.2.2 still imports the old generation API
+mamba-ssm==2.2.2                   # selective state space; install with --no-build-isolation
+causal-conv1d==1.4.0               # required by mamba-ssm; install with --no-build-isolation
+
+# Data + numerics
 numpy
 pandas
 scipy
-scikit-learn
-h5py
-networkx
-matplotlib
-torch-geometric
-tables
-tabulate
+h5py                                # METR-LA HDF5 reader
+tables                              # pandas HDF5 backend (needed by .h5 load)
+
+# Optional (used by legacy plotting and one ensemble member)
+einops                              # graph_wavenet, hybrid
+matplotlib                          # legacy/src/plot_results.py only
+networkx                            # legacy/src/recover_results.py only
+tabulate                            # legacy/src/run_experiment.py only

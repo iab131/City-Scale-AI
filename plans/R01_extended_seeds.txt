@@ -1,0 +1,39 @@
+R01 — Extended-seed STAEformer ensemble (seeds 4, 5, 6, 7) with hyperparam diversity
+=====================================================================================
+
+Hypothesis
+----------
+The existing 4-seed test-60min std is 0.004. Adding 4 more *identical-config*
+seeds gives diminishing returns (~−0.005 to −0.01). To get a real ensemble win
+we need *hyperparam diversity*, not just different RNG init. Vary dropout and
+batch_size across seeds 4–7 to create modestly different optima.
+
+Setup
+-----
+4 new runs, all paper-faithful otherwise (Adam lr=1e-3, wd=3e-4, MS [20,30] γ
+0.1, max 200 epochs, patience 30, batch 16, masked MAE):
+
+  seed 4: dropout=0.10 (baseline), batch_size=16 (baseline)  -> stae_R01_s4
+  seed 5: dropout=0.05 (less reg)  , batch_size=16            -> stae_R01_s5
+  seed 6: dropout=0.15 (more reg)  , batch_size=16            -> stae_R01_s6
+  seed 7: dropout=0.10              , batch_size=32 (smoother)-> stae_R01_s7
+
+Expected outcome
+----------------
+8-seed ensemble (4 existing + 4 new) → test 60-min ≈ 3.275–3.285 with ST-TTC.
+If the diverse-hyperparam seeds give larger spread than the identical-config seeds,
+the gain is in the −0.005 to −0.015 range on top of the current 3.283.
+
+Kill criterion
+--------------
+Per-seed: val_mae no improvement for 15 epochs → early-stop the run.
+Overall: if 4 new seeds all individually land worse than 3.36 60-min test (vs
+3.34 for the baseline seeds), the diversity hurt → revert to identical-config.
+
+Wall-clock estimate
+-------------------
+~30 min/seed × 4 sequential on H200 = ~2 hours.
+
+Run command (background, on remote)
+-----------------------------------
+nohup bash scripts/run_R01_seeds.sh > logs/R01_master.log 2>&1 &

@@ -1,0 +1,38 @@
+R02 — Bigger STAEformer (d_model=192, L=4, FFN=384) + stronger reg
+====================================================================
+
+Hypothesis
+----------
+Seed std=0.004 on test 60-min says architecture is at a structural plateau
+*for d_model=152*. The plateau may break with more capacity if combined
+with stronger regularization to keep overfitting in check.
+
+Setup
+-----
+Train 1 seed at scaled config:
+- input_embedding_dim = 32 (was 24)
+- tod_embedding_dim   = 32 (was 24)
+- dow_embedding_dim   = 32 (was 24)
+- adaptive_embedding_dim = 96 (was 80)
+→ model_dim = 192
+- feed_forward_dim = 384 (was 256)
+- num_layers = 4 (was 3)
+- dropout = 0.15 (was 0.10)
+- weight_decay = 5e-4 (was 3e-4)
+- batch_size = 16 (paper-faithful)
+- Adam lr 1e-3, MS [25, 40] γ 0.1, 200 epochs, patience 30
+
+Expected outcome
+----------------
+If capacity-bound: test 60-min 3.30–3.34 with single seed. If structurally
+plateaued: ≈ 3.34 unchanged or slightly worse.
+
+Kill criterion
+--------------
+Standard: val_mae no improvement for 15 epochs → early-stop.
+Architecture-kill: if at epoch 20 the val 60-min is worse than 3.18, abandon
+this size and try a different one (or skip ahead to R03 if running).
+
+Wall-clock estimate
+-------------------
+~40–50 min on H200 (bigger model + 4 layers).

@@ -1,0 +1,61 @@
+R03 — STMAE pretraining (TMAE only first; SMAE if TMAE helps) + STAEformer finetune
+======================================================================================
+
+Hypothesis
+----------
+The CIKM'23 STAEformer encoder learns short-window dependencies but lacks a
+"summary of the past week" signal. Pretraining a TMAE on long-history
+reconstruction yields a per-node embedding that captures longer-range
+temporal context. Bolted onto STAEformer as a 32-dim feature stream, this
+should give the model a head start on predicting state changes that depend
+on weekly periodicity.
+
+Setup
+-----
+
+R03a — Pretrain TMAE
+  - Long input: T_long = 2016 (1 week of 5-min steps)
+  - Patch size: 12 (one window)
+  - Num patches: 168
+  - Mask ratio: 0.75 (MAE convention)
+  - Embed dim: 96, 4 heads, FFN x4, encoder 4 layers, decoder 1 layer
+  - AdamW lr=5e-4, weight_decay=0, cosine warmup 3 epochs, 50 epochs
+  - Patience: 10 epochs no improvement → kill
+  - Batch size: 8 (each sample is [N=207, T=2016] so ~ 207*2016*4B = 1.7MB)
+  - Loss: masked MAE on reconstructed *masked* patches (in normalized space),
+    additionally masked by `missing_mask` so we don't ask the model to
+    reconstruct sensor-dropout zeros.
+
+R03b — Finetune STAEformer with frozen TMAE encoder
+  - Inputs: short window (x_norm, tod, dow) + long_hist [N, 2016]
+  - Pretrained encoder output: take last patch [B, N, 96]
+  - Adapter: Linear(96, 32) → per-node 32-dim feature
+  - Bolt onto STAEformer's existing 152-dim embedding concat → model_dim 184
+  - Same training regime as baseline STAEformer: Adam lr=1e-3, MS [20,30] γ 0.1,
+    80 epochs, patience 15. Batch size 8 (must fit long_hist in memory).
+  - Both pretrained encoder and STAEformer trainable params summary printed.
+
+Expected outcome
+----------------
+- R03a: val reconstruction MAE in [0.3, 0.6] normalized units → good signal,
+  if it doesn't drop below 0.6 the encoder isn't learning useful structure.
+- R03b: test 60-min MAE [3.20, 3.30] vs baseline 3.34. If the model isn't
+  picking up the pretrained signal, would be ~3.34 (no harm); if useful,
+  −0.05 to −0.14.
+
+Kill criterion
+--------------
+R03a: if val reconstruction MAE > 0.65 after 15 epochs (encoder isn't
+  learning), kill and abandon.
+R03b: standard val_mae no improvement for 15 epochs → early-stop.
+R03b: if first 10 epochs val_mae are all worse than 3.40, encoder is hurting
+  not helping → kill.
+
+Wall-clock estimate
+-------------------
+R03a: ~25–40 min (1.7K windows/epoch, batch 8 → 200 batches × 50 epochs ×
+  ~0.2s/batch = 33 min)
+R03b: ~45 min (extra encoder forward pass, batch 8 → ~3K windows × 80 epochs
+  with early stop probably ~30 epochs effective)
+
+Total: ~80 min on H200

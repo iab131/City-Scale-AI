@@ -1,97 +1,115 @@
-# City-Scale Traffic Forecasting with Graph Fourier Transform (GFT)
+# City-Scale Traffic Forecasting on METR-LA
 
-This project implements a traffic forecasting pipeline on the **METR-LA** dataset using the **Graph Fourier Transform (GFT)** as the spatial representation step.
+**Team City Scale AI** — Nengjia Li, Udula Abeykoon, Anirudh Bharadwaj Vangara, Enhe Bai, Ryan Rana
+University of Waterloo × Queen's University · Borealis AI / Let's Solve It · 2026
 
-The idea is:
+## Result
 
-1. Load traffic signals from METR-LA
-2. Build the road sensor graph from the provided adjacency matrix
-3. Compute the normalized graph Laplacian
-4. Perform eigendecomposition to obtain the graph Fourier basis
-5. Transform traffic signals into the spectral domain
-6. Train a temporal model on spectral coefficients
-7. Reconstruct predictions back to sensor space with inverse GFT
+**60-min test MAE = 3.283** on METR-LA — **#1 among reproducible methods** as of May 2026.
 
----
+| Horizon | MAE | RMSE | MAPE |
+|---:|---:|---:|---:|
+| 15 min | **2.611** | 4.970 | 6.78 % |
+| 30 min | **2.918** | 5.834 | 8.06 % |
+| 60 min | **3.283** | 6.812 | 9.61 % |
 
-## Project Goal
+Beats every other public method with working code, including MLCAFormer (3.30), STAEformer (3.34), STD-MAE (3.40), ST-SSDL (3.37), and FUSE-Traffic (3.39). The published numbers above this (TITAN 3.08, TESTAM+ 2.99) have no working public code; see `REPORT.md` for the full audit.
 
-Standard graph models often rely on local message passing.  
-This project instead moves node signals into the **spectral domain**, where traffic can be represented as global graph modes.
+## Architecture
 
-This makes it easier to model:
+A 4-seed ensemble of **STAEformer** (CIKM 2023) reproduced on our pipeline, followed by the **ST-TTC** test-time spectral calibrator (NeurIPS 2025 Spotlight).
 
-- city-wide congestion patterns
-- long-range dependencies
-- smooth vs. abrupt traffic variations
-
----
-
-## Dataset
-
-We use the **METR-LA** traffic forecasting dataset.
-
-Expected files:
-
-```text
-data/metr_la/
-├── metr-la.h5
-├── adj_METR-LA.pkl
+```
+4 × STAEformer (seeds 42, 1, 2, 3) ─┐
+                                     ├─► uniform-average normalized predictions
+                                     │     ↓
+                                     │   ST-TTC FFT amplitude+phase calibration
+                                     │     (streaming flash-update at test time)
+                                     ▼
+                          test predictions in raw mph
 ```
 
----
+The full STAEformer architecture (152-dim model, 3 temporal + 3 spatial Transformer layers, 80-dim adaptive embedding, mixed-projection output) is in `models/staeformer.py`. The ST-TTC calibrator (1 656 parameters total) is in `scripts/eval_stae_ensemble.py`.
 
-## Running Mamba k-Sweep Experiments
+## Reproduce the Result (2.5 hours on a single H200)
 
-The repository includes a Spectral Mamba model. A critical hyperparameter is `k` (the number of graph Fourier components kept). You can easily run experiments to sweep over `k`.
-
-**Important**: The comparison should be fair: only `k` changes during the sweep unless you explicitly change other hyperparameters (`d_model`, `num_layers`, `batch_size`, or `epochs`). The model still uses the same pipeline: data is GFT-transformed using `get_cached_gft_data(...)`, and the Mamba model (`SpectralMambaReal`) trains on these spectral coefficients.
-
-### 1. Run a smoke test
-Quick test to make sure everything runs without errors:
 ```bash
-python scripts/train_mamba.py --device cuda --k 8 --epochs 1 --batch_size 4
+# 1. Install dependencies
+pip install --no-build-isolation \
+    "transformers<4.45" causal-conv1d==1.4.0 mamba-ssm==2.2.2 \
+    h5py tables pandas scipy einops
+
+# 2. Train 4 STAEformer seeds sequentially (~2 h)
+python scripts/train_staeformer.py --tag stae_repro --seed 42 --batch_size 16
+bash scripts/run_stae_seeds_v2.sh   # seeds 1, 2, 3
+
+# 3. Final 4-seed ensemble + ST-TTC eval (~5 min)
+python scripts/eval_stae_ensemble.py --use_ttc \
+    --stae_ckpts "results/staeformer/stae_*/best_stae_s*.pth"
+# Expected output: 60-min MAE 3.283
 ```
 
-### 2. Manual single run
-Run with a specific `k` value:
-```bash
-python scripts/train_mamba.py --device cuda --k 64 --epochs 50 --batch_size 16
+## Repository Structure
+
+```
+├── REPORT.md                          full technical report
+├── README.md                          this file
+├── requirements.txt
+│
+├── data/                              METR-LA raw files (.h5, .pkl)
+├── cache/                             cached GFT artifacts (auto-generated)
+│
+├── src/                               core pipeline
+│   ├── data_utils.py                  H5 + adjacency loaders
+│   ├── graph_utils.py                 Laplacian / adjacency utilities
+│   ├── gft.py                         Graph Fourier Transform
+│   ├── preprocess_v2.py               masked z-score + TOD/DOW features
+│   └── dataset_v2.py                  sliding-window dataset
+│
+├── models/                            architectures
+│   ├── staeformer.py                  the headline backbone
+│   ├── spectral_ssm.py                our novel SSSM v1–v8 (bi-axis Mamba)
+│   ├── graph_wavenet.py               GWNet ensemble member
+│   └── hybrid.py                      STAEformer + spectral branch (ablation)
+│
+├── scripts/                           training & eval
+│   ├── train_staeformer.py            STAEformer training (paper-faithful + ablation flags)
+│   ├── train_sssm.py                  Spectral State Space Model variants
+│   ├── train_gwnet.py                 GraphWaveNet training
+│   ├── train_hybrid.py                hybrid training
+│   ├── eval_stae_ensemble.py          HEADLINE: 4-seed STAE + ST-TTC eval
+│   ├── eval_full_ensemble.py          multi-architecture ensemble with val-weighting
+│   ├── eval_ensemble.py               older v4 SSSM ensemble (legacy)
+│   └── run_stae_seeds_v2.sh           sequential 4-seed training driver
+│
+├── legacy/                            preserved earlier work + failed exploration
+│   └── README.md                      what's there and why
+│
+└── docs/
+    └── ssh-note.md                    Skynet cluster notes (original team)
 ```
 
-### 3. Run the full sweep interactively
-Run the k-sweep script directly (sweeps k = 8, 16, 32, 64, 96, 128):
-```bash
-bash scripts/run_mamba_k_sweep.sh
+## What This Repository Contains
+
+**Active pipeline** (gives the 3.283 result):
+- `src/`, `models/{staeformer,spectral_ssm,graph_wavenet,hybrid}.py`, `scripts/train_*.py`, `scripts/eval_*.py`.
+
+**Novel research contribution** (not used by the headline result, but documented in the report):
+- `models/spectral_ssm.py` — the bi-axis spectral Mamba family v1–v8. Mamba scanning along both time and spectral-mode axes is, to our knowledge, absent from every other published METR-LA model. It plateaued at 60-min test MAE 3.82, which we documented as a structural ceiling and then pivoted away from.
+
+**Preserved earlier work and negative results** in `legacy/`:
+- The original project's SpectralGRU + SpectralMambaReal pipeline.
+- Attempted reproductions that did NOT work (STGormer reproduction came in at 3.58 vs paper's 3.10).
+- Older exploratory scripts (multi-window, calendar prior, etc.).
+
+## The Bigger Picture
+
+We document a **reproducibility crisis** on METR-LA: every "above-3.30" published claim from 2024–2025 has a serious issue (paper withdrawn from venue, code never released, baseline numbers disagree with peer papers, or reproducers fail to match). Our 3.283 is the best result that anyone can actually run end-to-end from public code. See `REPORT.md` § 6 for the full audit.
+
+## Citation
+
+If you use this work, please cite:
 ```
-
-### 4. Submit the sweep on Skynet (Slurm)
-Submit the job to the cluster. Make sure to update the repo path and virtual environment path in `scripts/slurm_train_mamba_k_sweep.sh` before running!
-```bash
-sbatch scripts/slurm_train_mamba_k_sweep.sh
-```
-
-### 5. Monitor and Manage Skynet Job
-Check queue:
-```bash
-squeue -u $USER
-```
-
-Watch logs (replace `<JOBID>` with the actual job ID):
-```bash
-tail -f logs/mamba_k_sweep_<JOBID>.out
-```
-
-Cancel job:
-```bash
-scancel <JOBID>
-```
-
-### Results & Checkpoints
-- Results (metrics and configs) are saved and appended to: `results/mamba/k_sweep/mamba_k_sweep_results.csv`
-- Model checkpoints are saved separately by `k` at: `results/mamba/k_sweep/checkpoints/best_mamba_k_<k>.pth`
-
-To download the results back to your local computer, run from your **local machine**:
-```bash
-scp -r skynet:~/City-Scale-AI/results/mamba/k_sweep ./local_results
+City Scale AI / Borealis AI Let's Solve It 2026, "Spectral State Space Models and a Reproducible
+SOTA Pipeline for METR-LA". Internal report. University of Waterloo × Queen's University, 2026.
 ```

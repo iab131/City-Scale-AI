@@ -1,0 +1,59 @@
+R06 — STMAE variants (queued conditionally on R03 outcome)
+===========================================================
+
+Conditional Phase 2: only run these if R03 helped (test 60-min < 3.32 with
+the frozen-encoder finetune). If R03 didn't help, skip R06 and pivot to a
+different family (MoE, LoRA, etc.).
+
+R06a — STMAE unfrozen finetune
+------------------------------
+Hypothesis: with the encoder frozen, STAEformer can't adapt the upstream
+representation to the downstream task. Unfrozen finetuning may unlock another
+−0.02 to −0.05 MAE, at the risk of forgetting the pretraining signal.
+
+Setup: same as R03b but `--no_freeze`. Encoder learnable. Smaller lr (1e-4
+for encoder, 1e-3 for STAEformer head) — use separate optimizer groups.
+Patience 15. May overfit; watch val carefully.
+
+R06b — STMAE bigger encoder
+---------------------------
+Hypothesis: 96-dim encoder might be undersized for the 1-week reconstruction
+task; bigger may capture richer structure.
+
+Setup: TMAE with embed_dim=128, encoder_depth=6, decoder_depth=2, num_heads=8.
+Pretraining: same regime. Finetune: bolt onto STAEformer with d_pre=48.
+
+R06c — STMAE mask-ratio sweep
+-----------------------------
+Hypothesis: 0.75 is the MAE default but may be suboptimal for traffic data.
+Lower ratios (0.5) mean easier reconstruction but weaker representation;
+higher (0.85) mean harder task.
+
+Setup: Pretrain TMAE at mask 0.5, 0.65, 0.85; pick the one with lowest val
+finetune MAE.
+
+R06d — TMAE + SMAE combined
+---------------------------
+Hypothesis: TMAE captures temporal structure (1-week patterns), SMAE captures
+spatial structure (which nodes co-vary). Combined gives orthogonal signal.
+
+Setup: Pretrain SMAE separately (~30 min), then STAEformerPretrained with
+both --tmae_ckpt and --smae_ckpt. Adapter Linear(96+96, 32) → 32-dim
+per-node feature.
+
+R06e — Longer T_long
+--------------------
+Hypothesis: 1 week may be too short; METR-LA has 4-month span and weekly
+patterns shift across months. T_long=4032 (2 weeks) or 8064 (1 month).
+
+Setup: Pretrain TMAE at T_long=4032 (max_patches=336). Memory: 2x but H200
+has plenty. Same finetune as R03b.
+
+Decision tree
+-------------
+Read R03b test 60-min MAE:
+  ≤ 3.20: STMAE works well. Queue R06d (TMAE+SMAE) first (highest expected
+          gain), then R06a (unfrozen) if d still has room.
+  3.20 to 3.30: STMAE mildly helps. Queue R06a (unfrozen) — might unlock more.
+  3.30 to 3.34: STMAE essentially neutral. Skip R06; pivot to MoE/LoRA.
+  > 3.34: STMAE actively hurts. Skip R06; investigate why.

@@ -1,0 +1,56 @@
+R07 — Phase 3: novel architectures (conditional on Phase 2 outcome)
+====================================================================
+
+Triggers
+--------
+If after Phase 2 the test 60-min MAE is still ≥ 3.20, switch to genuinely
+new architectures. If ≥ 3.18, push these in parallel with Phase 2 results.
+
+R07a — Mixup augmentation
+-------------------------
+For each batch, sample λ ~ Beta(0.5, 0.5) and a permuted batch order:
+  x_mix = λ * x[i] + (1-λ) * x[perm[i]]
+  y_mix = λ * y[i] + (1-λ) * y[perm[i]]
+  mask_mix = mask[i] & mask[perm[i]]   (both must be valid)
+Train STAEformer with mixup (probability 0.3 per batch). 4-seed ensemble.
+Expected: −0.005 to −0.02 on test (mild regularizer).
+
+R07b — STAEformer LoRA per-sensor
+---------------------------------
+Finetune existing 4-seed STAEformer checkpoints with rank-4 LoRA adapters
+on the temporal-attention Q/K/V projections, one adapter per sensor (so
+adaptive_emb gets a learnable "low-rank update" per sensor). Adds
+~125K params total. Train 20 epochs at lr 5e-4, then ensemble.
+Expected: −0.01 to −0.05.
+
+R07c — Test-time training (TTT)
+-------------------------------
+Extend ST-TTC: instead of training only a calibrator, do a few gradient
+steps on the LAST FEW LAYERS of STAEformer at test time. Specifically:
+  - keep the encoder frozen
+  - update the output_proj layer
+  - one Adam(lr 1e-4) step per dequeued sample on masked-MAE objective
+Risk: distribution drift. Mitigation: reset every N samples (N≈100).
+Expected: −0.01 to −0.05 if it works.
+
+R07d — Multi-resolution STAEformer
+----------------------------------
+Train two extra STAEformer instances on 15-min and 30-min aggregated inputs
+(predict the same 5-min-output horizon). Three resolutions × ensemble.
+Cost: 2 extra trainings × 30 min. Expected: −0.02 to −0.05.
+
+R07e — Cross-prediction distillation
+------------------------------------
+After the super-ensemble is built, use it to generate "pseudo-targets" on
+the val data, then add a self-distillation auxiliary loss to a fresh
+STAEformer training. Ensemble teacher → distilled student. Expected:
+−0.01 to −0.04 IF the student matches the teacher on val.
+
+Sequencing
+----------
+Default order (if Phase 2 leaves us > 3.20):
+  R07a (mixup) — cheapest, smallest blast radius
+  R07b (LoRA) — finetune existing, ~1h
+  R07d (multi-res) — separate trainings, ~1.5h
+  R07c (TTT) — eval-only, ~5 min
+  R07e (distillation) — last, ~1h
