@@ -1,0 +1,33 @@
+experiment:
+  tag: "stageF_jointft"
+
+trunk:
+  freeze: false
+  partial_unfreeze: true
+  partial_unfreeze_last_n: 1
+  partial_unfreeze_output: true
+
+model:
+  use_temporal_residual: true
+  use_symmetric_spectral: true
+  use_magnetic_spectral: true
+  use_horizon_cluster_router: true
+  n_clusters: 12
+  router_d: 32
+  alpha_init: 0.10
+  k_modes: 48
+  q_charge: 0.10
+
+loss:
+  lambda_res: 0.2
+  lambda_cong: 0.1
+  lambda_entropy: 5.0e-3
+
+train:
+  epochs: 25
+  batch_size: 32
+  learning_rate: 5.0e-5    # very small for joint FT
+  weight_decay: 1.0e-5
+  lr_milestones: [10, 18]
+  patience: 8
+  use_torch_compile: false

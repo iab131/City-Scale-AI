@@ -1,0 +1,89 @@
+# Main DiSR-Mamba sweep used to populate the ablation table.
+# Each `run` shares the trunk checkpoint resolution (via cfg.trunk.ckpt_glob);
+# overrides change only the residual config.
+
+seeds: [0, 1, 2]            # 3 seeds for intermediate; final candidates rerun with 5.
+
+runs:
+  # ---- Stage B controls ----
+  - name: stageB_mlp
+    config: configs/disr/stage_b_temporal.yaml
+    overrides:
+      experiment:
+        tag: "stageB_mlp"
+      model:
+        # Use only the temporal residual with d_model=1, n_layers=1 to approximate
+        # an MLP residual head (the simplest possible control).
+        use_temporal_residual: true
+        use_symmetric_spectral: false
+        use_magnetic_spectral: false
+        d_model: 32
+        n_layers: 1
+
+  - name: stageB_temporal
+    config: configs/disr/stage_b_temporal.yaml
+
+  # ---- Stage C symmetric spectral ----
+  - name: stageC_K32_low
+    config: configs/disr/stage_c_symspec.yaml
+    overrides:
+      experiment: {tag: "stageC_K32_low"}
+      model: {k_modes: 32, spectral_side: "low"}
+  - name: stageC_K48_low
+    config: configs/disr/stage_c_symspec.yaml
+  - name: stageC_K64_low
+    config: configs/disr/stage_c_symspec.yaml
+    overrides:
+      experiment: {tag: "stageC_K64_low"}
+      model: {k_modes: 64}
+
+  # ---- Stage D magnetic spectral ----
+  - name: stageD_q005_K48
+    config: configs/disr/stage_d_magspec.yaml
+    overrides:
+      experiment: {tag: "stageD_q005_K48"}
+      model: {q_charge: 0.05}
+  - name: stageD_q010_K48
+    config: configs/disr/stage_d_magspec.yaml
+  - name: stageD_q015_K48
+    config: configs/disr/stage_d_magspec.yaml
+    overrides:
+      experiment: {tag: "stageD_q015_K48"}
+      model: {q_charge: 0.15}
+  - name: stageD_q020_K48
+    config: configs/disr/stage_d_magspec.yaml
+    overrides:
+      experiment: {tag: "stageD_q020_K48"}
+      model: {q_charge: 0.20}
+  - name: stageD_q025_K48
+    config: configs/disr/stage_d_magspec.yaml
+    overrides:
+      experiment: {tag: "stageD_q025_K48"}
+      model: {q_charge: 0.25}
+
+  # ---- Stage E horizon-cluster router ----
+  - name: stageE_router_c12
+    config: configs/disr/stage_e_router.yaml
+  - name: stageE_router_c8
+    config: configs/disr/stage_e_router.yaml
+    overrides:
+      experiment: {tag: "stageE_router_c8"}
+      model: {n_clusters: 8}
+  - name: stageE_router_c16
+    config: configs/disr/stage_e_router.yaml
+    overrides:
+      experiment: {tag: "stageE_router_c16"}
+      model: {n_clusters: 16}
+
+  # ---- Ablations ----
+  - name: ablate_no_cong
+    config: configs/disr/stage_e_router.yaml
+    overrides:
+      experiment: {tag: "ablate_no_cong"}
+      loss: {lambda_cong: 0.0}
+
+  - name: ablate_no_modeaxis
+    config: configs/disr/stage_e_router.yaml
+    overrides:
+      experiment: {tag: "ablate_no_modeaxis"}
+      model: {biaxis_mode_axis: false}

@@ -1,0 +1,30 @@
+experiment:
+  tag: "stageE_router"
+
+model:
+  use_temporal_residual: true
+  use_symmetric_spectral: true
+  use_magnetic_spectral: true
+  use_horizon_cluster_router: true
+  n_clusters: 12
+  router_d: 32
+  alpha_init: 1.00
+  alpha_max: 1.5
+  k_modes: 48
+  q_charge: 0.10
+  d_model: 48                       # ↓ from 64 to reduce overfitting risk.
+  n_layers: 1                       # ↓ from 2 — Stage C overfit at 2 layers.
+  dropout: 0.25                     # ↑ from 0.10 — same reason.
+
+loss:
+  lambda_res: 0.0
+  lambda_cong: 0.1
+  lambda_entropy: 5.0e-3
+
+train:
+  epochs: 35                        # ↓ — best val on Stage C was at ep 1, so
+  patience: 6                       # ↓ — keep early stop aggressive.
+  batch_size: 64
+  learning_rate: 5.0e-4             # ↓ from 1.5e-3 — gentler residual updates.
+  weight_decay: 1.0e-3              # ↑ x10 from base for residual saturation.
+  use_torch_compile: false

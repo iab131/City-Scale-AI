@@ -1,0 +1,52 @@
+{
+  "ensemble": {
+    "avg_mae": 2.8944008350372314,
+    "avg_rmse": 5.852855205535889,
+    "avg_mape": 0.07973738014698029,
+    "mae_15": 2.6186683177948,
+    "rmse_15": 5.003493785858154,
+    "mape_15": 0.06784874200820923,
+    "mae_30": 2.921583652496338,
+    "rmse_30": 5.8741559982299805,
+    "mape_30": 0.08054842054843903,
+    "mae_60": 3.2915351390838623,
+    "rmse_60": 6.878105163574219,
+    "mape_60": 0.09638753533363342
+  },
+  "per_speed_regime": {
+    "mae_lt20": 8.319304466247559,
+    "count_lt20": 503811,
+    "mae_20_40": 7.223776817321777,
+    "count_20_40": 1340225,
+    "mae_40_60": 4.1785197257995605,
+    "count_40_60": 3444355,
+    "mae_ge60": 1.547675371170044,
+    "count_ge60": 9622173
+  },
+  "n_models": 7,
+  "stae_paths": [
+    "results/staeformer/stae_trunk/best_stae_s42.pth",
+    "results/staeformer/stae_trunk_s1/best_stae_s1.pth",
+    "results/staeformer/stae_trunk_s2/best_stae_s2.pth",
+    "results/staeformer/stae_trunk_s3/best_stae_s3.pth"
+  ],
+  "disr_paths": [
+    "results/disr/stageC_symspec_trunk1_s0/best_disr.pth",
+    "results/disr/stageC_symspec_trunk2_s0/best_disr.pth",
+    "results/disr/stageC_symspec_trunk3_s0/best_disr.pth"
+  ],
+  "with_ttc": {
+    "avg_mae": 2.8921098709106445,
+    "avg_rmse": 5.8480987548828125,
+    "avg_mape": 0.07963957637548447,
+    "mae_15": 2.6177852153778076,
+    "rmse_15": 5.000463008880615,
+    "mape_15": 0.06781752407550812,
+    "mae_30": 2.919062852859497,
+    "rmse_30": 5.869228839874268,
+    "mape_30": 0.0804341658949852,
+    "mae_60": 3.2874650955200195,
+    "rmse_60": 6.871459007263184,
+    "mape_60": 0.09620322287082672
+  }
+}

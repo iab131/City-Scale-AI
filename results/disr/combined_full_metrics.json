@@ -1,0 +1,58 @@
+{
+  "ensemble": {
+    "avg_mae": 2.898163318634033,
+    "avg_rmse": 5.859989166259766,
+    "avg_mape": 0.07982135564088821,
+    "mae_15": 2.6225662231445312,
+    "rmse_15": 5.009185791015625,
+    "mape_15": 0.06794660538434982,
+    "mae_30": 2.9258828163146973,
+    "rmse_30": 5.87719202041626,
+    "mape_30": 0.08060237765312195,
+    "mae_60": 3.2966387271881104,
+    "rmse_60": 6.891279220581055,
+    "mape_60": 0.09646100550889969
+  },
+  "per_speed_regime": {
+    "mae_lt20": 8.324496269226074,
+    "count_lt20": 503811,
+    "mae_20_40": 7.21596097946167,
+    "count_20_40": 1340225,
+    "mae_40_60": 4.182765483856201,
+    "count_40_60": 3444355,
+    "mae_ge60": 1.5528030395507812,
+    "count_ge60": 9622173
+  },
+  "n_models": 13,
+  "stae_paths": [
+    "results/staeformer/stae_trunk/best_stae_s42.pth",
+    "results/staeformer/stae_trunk_s1/best_stae_s1.pth",
+    "results/staeformer/stae_trunk_s2/best_stae_s2.pth",
+    "results/staeformer/stae_trunk_s3/best_stae_s3.pth"
+  ],
+  "disr_paths": [
+    "results/disr/stageB_temporal_s0/best_disr.pth",
+    "results/disr/stageC_symspec_s0/best_disr.pth",
+    "results/disr/stageC_symspec_s1/best_disr.pth",
+    "results/disr/stageC_symspec_s2/best_disr.pth",
+    "results/disr/stageC_symspec_trunk1_s0/best_disr.pth",
+    "results/disr/stageC_symspec_trunk2_s0/best_disr.pth",
+    "results/disr/stageC_symspec_trunk3_s0/best_disr.pth",
+    "results/disr/stageD_q005_K48_s0/best_disr.pth",
+    "results/disr/stageE_router_s0/best_disr.pth"
+  ],
+  "with_ttc": {
+    "avg_mae": 2.8960928916931152,
+    "avg_rmse": 5.856650352478027,
+    "avg_mape": 0.0796925276517868,
+    "mae_15": 2.6219491958618164,
+    "rmse_15": 5.007631778717041,
+    "mape_15": 0.06788487732410431,
+    "mae_30": 2.923567056655884,
+    "rmse_30": 5.8738508224487305,
+    "mape_30": 0.08045540750026703,
+    "mae_60": 3.2927255630493164,
+    "rmse_60": 6.886254787445068,
+    "mape_60": 0.09624588489532471
+  }
+}

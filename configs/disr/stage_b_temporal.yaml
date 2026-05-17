@@ -1,0 +1,20 @@
+experiment:
+  tag: "stageB_temporal"
+
+model:
+  use_temporal_residual: true
+  use_symmetric_spectral: false
+  use_magnetic_spectral: false
+  use_horizon_cluster_router: false
+  d_model: 64
+  n_layers: 2
+
+loss:
+  lambda_res: 0.0
+  lambda_cong: 0.0     # Stage B: control without congestion-aware loss
+
+train:
+  epochs: 50
+  patience: 12
+  batch_size: 64
+  use_torch_compile: false

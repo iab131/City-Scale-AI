@@ -1,0 +1,10 @@
+tag,seed,trunk_ckpt,experts,best_val_mae,test_mae_15,test_mae_30,test_mae_60,test_avg_mae,test_rmse_60,elapsed_sec,max_gpu_mb,timestamp
+stageB_temporal,0,results/staeformer/stae_trunk/best_stae_s42.pth,temporal,2.7381,2.6515,2.961,3.3387,2.9324,7.0123,482.0,3069,2026-05-14T22:52:38
+stageC_symspec,0,results/staeformer/stae_trunk/best_stae_s42.pth,temporal|sym_spectral,2.7409,2.6535,2.9629,3.338,2.9333,7.0067,547.5,3072,2026-05-14T23:01:49
+stageD_q000_K48,0,results/staeformer/stae_trunk/best_stae_s42.pth,temporal|sym_spectral|mag_spectral,2.7403,2.6529,2.9623,3.338,2.9327,7.0005,650.1,3076,2026-05-14T23:12:44
+stageE_router,0,results/staeformer/stae_trunk/best_stae_s42.pth,temporal|sym_spectral|mag_spectral,2.7389,2.6515,2.9593,3.3386,2.9315,7.0096,215.6,3078,2026-05-14T23:16:33
+stageC_symspec,1,results/staeformer/stae_trunk/best_stae_s42.pth,temporal|sym_spectral,2.7413,2.6528,2.9594,3.3554,2.9344,7.0269,1550.8,3072,2026-05-14T23:42:28
+stageC_symspec,2,results/staeformer/stae_trunk/best_stae_s42.pth,temporal|sym_spectral,2.7434,2.6534,2.9608,3.3487,2.9359,7.0279,1653.0,3072,2026-05-15T00:10:06
+stageC_symspec_trunk1,0,results/staeformer/stae_trunk_s1/best_stae_s1.pth,temporal|sym_spectral,2.7261,2.6484,2.9622,3.349,2.9352,7.0087,588.0,3072,2026-05-15T01:14:36
+stageC_symspec_trunk2,0,results/staeformer/stae_trunk_s2/best_stae_s2.pth,temporal|sym_spectral,2.7448,2.6602,2.967,3.3464,2.9401,7.0245,547.8,3072,2026-05-15T01:23:48
+stageC_symspec_trunk3,0,results/staeformer/stae_trunk_s3/best_stae_s3.pth,temporal|sym_spectral,2.7347,2.6477,2.9632,3.345,2.9333,7.0472,548.0,3072,2026-05-15T01:33:00

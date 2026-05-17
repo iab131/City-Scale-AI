@@ -1,0 +1,90 @@
+# Base config for DiSR-Mamba.
+# All experiments inherit these defaults and override only the keys they change.
+
+experiment:
+  tag: "disr_base"
+  out_dir: "results/disr"
+  seed: 42
+
+data:
+  data_path: "data/METR-LA.h5"
+  adj_path: "data/adj_METR-LA.pkl"
+  cache_dir: "cache/gft"
+  n_nodes: 207
+  in_steps: 12
+  out_steps: 12
+
+trunk:
+  type: "staeformer"
+  # Either checkpoint path or "" to load from a glob.
+  ckpt_path: ""
+  ckpt_glob: "results/staeformer/*/best_stae_s*.pth"
+  # Which spec checkpoint to pick when multiple are returned by the glob:
+  # "best_val", "first", or specific seed.
+  pick: "best_val"
+  freeze: true
+  partial_unfreeze: false        # Stage F: light joint fine-tune
+  partial_unfreeze_last_n: 1     # number of spatial layers to unfreeze
+  partial_unfreeze_output: true
+
+model:
+  # ----- expert switches -----
+  use_temporal_residual: true
+  use_symmetric_spectral: false
+  use_magnetic_spectral: false
+  use_learned_basis: false
+  # ----- expert hyperparams ---
+  d_model: 64
+  n_layers: 2
+  d_state: 16
+  d_conv: 4
+  expand: 2
+  dropout: 0.1
+  biaxis_mode_axis: true
+  # ----- spectral params -----
+  k_modes: 48
+  spectral_side: "low"             # "low" / "high" / "both"
+  q_charge: 0.10                   # magnetic charge
+  learned_k: 48
+  # ----- routing -----
+  use_horizon_cluster_router: false
+  n_clusters: 12
+  router_d: 32
+  alpha_init: 1.00                 # alpha=1.0 lets L_main drive directly; the
+                                   # zero-initialised head keeps delta≈0 at start.
+  alpha_max: 1.5
+  # ----- TTC -----
+  use_ttc: false
+  ttc_groups: 4
+  ttc_lr: 1.0e-4
+
+loss:
+  # With alpha_init=1.0 the L_main term already implicitly encodes L_res, so
+  # we default lambda_res to 0.0. Stages can override to add an explicit
+  # residual-match pull if useful.
+  lambda_res: 0.0
+  lambda_cong: 0.1
+  speed_thr: 20.0
+  delta_thr: 5.0
+  use_congestion_loss: true
+  lambda_entropy: 1.0e-3
+
+train:
+  epochs: 60
+  patience: 12
+  batch_size: 64
+  learning_rate: 1.5e-3
+  weight_decay: 1.0e-4
+  lr_milestones: [25, 40]
+  lr_gamma: 0.5
+  gradient_clip: 5.0
+  use_amp: true
+  num_workers: 4
+  use_torch_compile: false      # Mamba+compile can be flaky; keep eager.
+  log_every: 50
+
+eval:
+  batch_size: 128
+  save_predictions: true
+  save_per_cluster: true
+  save_per_speed_regime: true

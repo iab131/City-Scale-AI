@@ -1,0 +1,10 @@
+tag,seed,experts,trunk_ckpt,best_val_mae,test_mae_15,test_mae_30,test_mae_60,test_avg_mae,test_rmse_60,elapsed_sec,max_gpu_mb
+stageC_symspec,0,temporal|sym_spectral,best_stae_s42.pth,2.7409,2.6535,2.9629,3.338,2.9333,7.0067,547,3072
+stageD_q005_K48,0,temporal|sym_spectral|mag_spectral,best_stae_s42.pth,2.7403,2.6529,2.9623,3.338,2.9327,7.0005,650,3076
+stageE_router,0,temporal|sym_spectral|mag_spectral,best_stae_s42.pth,2.7389,2.6515,2.9593,3.3386,2.9315,7.0096,215,3078
+stageB_temporal,0,temporal,best_stae_s42.pth,2.7381,2.6515,2.961,3.3387,2.9324,7.0123,482,3069
+stageC_symspec_trunk3,0,temporal|sym_spectral,best_stae_s3.pth,2.7347,2.6477,2.9632,3.345,2.9333,7.0472,548,3072
+stageC_symspec_trunk2,0,temporal|sym_spectral,best_stae_s2.pth,2.7448,2.6602,2.967,3.3464,2.9401,7.0245,547,3072
+stageC_symspec,2,temporal|sym_spectral,best_stae_s42.pth,2.7434,2.6534,2.9608,3.3487,2.9359,7.0279,1653,3072
+stageC_symspec_trunk1,0,temporal|sym_spectral,best_stae_s1.pth,2.7261,2.6484,2.9622,3.349,2.9352,7.0087,588,3072
+stageC_symspec,1,temporal|sym_spectral,best_stae_s42.pth,2.7413,2.6528,2.9594,3.3554,2.9344,7.0269,1550,3072

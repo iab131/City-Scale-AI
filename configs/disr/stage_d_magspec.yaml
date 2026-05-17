@@ -1,0 +1,23 @@
+experiment:
+  tag: "stageD_magspec"
+
+model:
+  use_temporal_residual: true
+  use_symmetric_spectral: true
+  use_magnetic_spectral: true
+  use_horizon_cluster_router: false
+  k_modes: 48
+  spectral_side: "low"
+  q_charge: 0.10
+  d_model: 64
+  n_layers: 2
+
+loss:
+  lambda_res: 0.0
+  lambda_cong: 0.1
+
+train:
+  epochs: 60
+  patience: 12
+  batch_size: 64
+  use_torch_compile: false
