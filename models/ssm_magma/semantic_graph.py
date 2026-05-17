@@ -93,10 +93,12 @@ class SemanticGraph(nn.Module):
 
     # ----------------------------------------------------------------
     def maybe_refresh(self, force: bool = False) -> None:
-        if force or self.U.numel() == 0 or (
-            self.training
-            and (int(self.step_counter.item()) % self.refresh_steps == 0)
-        ):
+        # In training: recompute every forward so the eigenbasis stays in
+        # the current autograd graph (otherwise the second backward fails
+        # with "backward through the graph a second time") AND the
+        # embedding receives gradients from the forecasting loss.
+        # In eval: cache and refresh on first call only.
+        if self.training or force or self.U.numel() == 0:
             self._compute_basis()
         if self.training:
             self.step_counter += 1
