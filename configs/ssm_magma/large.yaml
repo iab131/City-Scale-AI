@@ -1,0 +1,17 @@
+experiment:
+  tag: "ssm_magma_large"
+  out_dir: "results/ssm_magma"
+  seed: 0
+
+model:
+  d_model: 96
+  n_layers: 3
+  k_modes: 64
+  d_sem: 32
+  k_neighbors: 16
+  dropout: 0.15
+
+train:
+  batch_size: 48
+  epochs: 90
+  patience: 18

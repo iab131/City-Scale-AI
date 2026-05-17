@@ -1,0 +1,5 @@
+experiment:
+  tag: "testam_s1"
+  seed: 1
+model:
+  dropout: 0.15

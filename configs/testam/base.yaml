@@ -1,0 +1,31 @@
+# TESTAM defaults for METR-LA.
+# Mirror the paper's settings: hidden=32, layers=3, dropout=0.3, batch=64, lr=1e-3.
+experiment:
+  tag: "testam"
+  out_dir: "results/testam"
+  seed: 0
+
+model:
+  N: 207
+  in_steps: 12
+  out_steps: 12
+  d_model: 32
+  num_layers: 3
+  ffn_dim: 64
+  num_heads: 4
+  dropout: 0.3
+  memory_size: 20
+  d_emb: 16
+  d_gate: 32
+
+train:
+  batch_size: 64
+  epochs: 100
+  patience: 20
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-4
+  lr_milestones: [30, 50]
+  lr_gamma: 0.1
+  gradient_clip: 5.0
+  use_amp: true
+  num_workers: 4

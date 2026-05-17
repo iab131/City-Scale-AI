@@ -1,0 +1,34 @@
+experiment:
+  tag: "ssm_magma"
+  out_dir: "results/ssm_magma"
+  seed: 0
+
+model:
+  N: 207
+  in_steps: 12
+  out_steps: 12
+  d_model: 64
+  n_layers: 2
+  dropout: 0.10
+  k_modes: 48
+  q_charge: 0.10
+  d_sem: 24
+  k_neighbors: 12
+  n_clusters: 12
+  alpha_init: 1.0
+  use_sym: true
+  use_mag: true
+  use_sem: true
+  use_router: true
+
+train:
+  batch_size: 64
+  epochs: 80
+  patience: 15
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-4
+  lr_milestones: [30, 50]
+  lr_gamma: 0.5
+  gradient_clip: 5.0
+  use_amp: true
+  num_workers: 4
