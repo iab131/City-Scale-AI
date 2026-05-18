@@ -1,0 +1,55 @@
+experiment:
+  tag: "stae_spectral_magma"
+  out_dir: "results/stae_spectral_magma"
+  seed: 0
+
+model:
+  N: 207
+  in_steps: 12
+  out_steps: 12
+
+  # STAEformer encoder (matches reference defaults)
+  input_embedding_dim: 24
+  tod_embedding_dim: 24
+  dow_embedding_dim: 24
+  adaptive_embedding_dim: 80
+  feed_forward_dim: 256
+  num_heads: 4
+  num_layers: 3
+  dropout: 0.10
+
+  # Spectral sidechain (kept small relative to the encoder)
+  d_branch: 64
+  spec_n_layers: 2
+  spec_d_state: 16
+  spec_d_conv: 4
+  spec_expand: 2
+  spec_dropout: 0.10
+  spec_mode_axis: true
+  k_modes_sem: 64
+  k_modes_sym: 64        # used by the training script to pick precomputed basis
+  k_modes_mag: 64
+  q_charge: 0.10
+
+  d_sem: 24
+  k_neighbors: 12
+  n_clusters: 12
+
+  use_sym: true
+  use_mag: true
+  use_sem: true
+  use_router: true
+  alpha_init: 1.0
+  alpha_max: 1.5
+
+train:
+  batch_size: 16
+  epochs: 80
+  patience: 15
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-4
+  lr_milestones: [30, 50]
+  lr_gamma: 0.5
+  gradient_clip: 5.0
+  use_amp: true
+  num_workers: 4
