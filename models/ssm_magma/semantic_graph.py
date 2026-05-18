@@ -83,13 +83,32 @@ class SemanticGraph(nn.Module):
     # ----------------------------------------------------------------
     def _compute_basis(self):
         L = self._knn_laplacian()
-        # eigh works fine on a 207x207 matrix on GPU.
-        evals, V = torch.linalg.eigh(L)
-        # Take K lowest eigenvalues (smooth modes).
+        # Stability: eigh on the learned kNN Laplacian intermittently fails
+        # with "ill-conditioned or repeated eigenvalues" once embeddings
+        # drift into degenerate configurations during training. Three
+        # defences: (a) jitter the diagonal, (b) force fp32 even under
+        # bf16 autocast, (c) fall back to the previously cached basis if
+        # eigh still throws.
+        eps = 1.0e-5
+        L_stable = L.to(torch.float32) + eps * torch.eye(
+            L.shape[0], device=L.device, dtype=torch.float32
+        )
+        try:
+            evals, V = torch.linalg.eigh(L_stable)
+        except Exception as e:
+            if self.U.numel() > 0:
+                # Keep the last good basis; skip this refresh.
+                return
+            # Cold start: ditch the learned graph and use the identity.
+            n = L.shape[0]
+            evals = torch.zeros(n, device=L.device)
+            V = torch.eye(n, device=L.device)
         K = self.k_modes
         idx = torch.arange(K, device=L.device)
-        self.U = V[:, idx].contiguous()
-        self.evals = evals[idx].contiguous()
+        # Cast back to the parent module's runtime dtype on assignment so
+        # the rest of the model can mix bf16 cleanly.
+        self.U = V[:, idx].contiguous().to(L.dtype)
+        self.evals = evals[idx].contiguous().to(L.dtype)
 
     # ----------------------------------------------------------------
     def maybe_refresh(self, force: bool = False) -> None:
