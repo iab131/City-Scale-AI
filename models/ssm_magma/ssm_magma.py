@@ -34,18 +34,28 @@ class SemanticSpectralExpert(nn.Module):
                  in_steps: int = 12, out_steps: int = 12,
                  d_model: int = 64, n_layers: int = 2,
                  d_state: int = 16, d_conv: int = 4, expand: int = 2,
-                 dropout: float = 0.1, mode_axis: bool = True):
+                 dropout: float = 0.1, mode_axis: bool = True,
+                 head_init_std: Optional[float] = None,
+                 d_adp_emb: int = 0):
+        # forward-declared to keep the signature symmetric with the base
+        # spectral experts in models/disr/disr_mamba.py
         super().__init__()
         self.n_nodes = n_nodes
         self.in_steps = in_steps
         self.out_steps = out_steps
         self.d_model = d_model
         self.semantic_graph = semantic_graph
+        self.d_adp_emb = d_adp_emb
 
         self.in_proj = nn.Linear(1, d_model)
         self.tod_embed = nn.Embedding(288, d_model // 4)
         self.dow_embed = nn.Embedding(7, d_model // 4)
         self.feat_proj = nn.Linear(d_model + d_model // 2, d_model)
+
+        if d_adp_emb > 0:
+            self.adp_proj = nn.Linear(d_adp_emb, d_model)
+        else:
+            self.adp_proj = None
 
         self.block = BiAxisMambaBlock(
             d_model=d_model, n_layers=n_layers,
@@ -53,11 +63,13 @@ class SemanticSpectralExpert(nn.Module):
             dropout=dropout, mode_axis=mode_axis,
         )
         self.head = nn.Linear(in_steps * d_model, out_steps)
-        nn.init.normal_(self.head.weight, mean=0.0, std=1.0e-3)
-        nn.init.zeros_(self.head.bias)
+        if head_init_std is not None:
+            nn.init.normal_(self.head.weight, mean=0.0, std=head_init_std)
+            nn.init.zeros_(self.head.bias)
 
     def forward(self, x_norm: torch.Tensor, tod: torch.Tensor,
-                dow: torch.Tensor) -> torch.Tensor:
+                dow: torch.Tensor,
+                adaptive_emb: Optional[torch.Tensor] = None) -> torch.Tensor:
         B, T_in, N = x_norm.shape
         U, _ = self.semantic_graph.get_basis()                  # [N, K]
         # project: Z = U^T X
@@ -71,6 +83,14 @@ class SemanticSpectralExpert(nn.Module):
         dow_e = self.dow_embed(dow_idx).unsqueeze(2).expand(B, T_in, K, -1)
         h = torch.cat([h, tod_e, dow_e], dim=-1)
         h = self.feat_proj(h)                                   # [B, T_in, K, d]
+
+        # Adaptive-embedding side channel through the (refreshed) learned
+        # basis. Same shape contract as the sym/mag experts:
+        # adaptive_emb is [B, T_in, N, d_adp_emb], TOD-indexed by SSMMagma.
+        if adaptive_emb is not None and self.adp_proj is not None:
+            adp_spec = torch.einsum("nk,btne->btke", U, adaptive_emb)  # [B, T_in, K, d_adp]
+            adp_feat = self.adp_proj(adp_spec)                          # [B, T_in, K, d_model]
+            h = h + adp_feat
 
         h = self.block(h)                                       # [B, T_in, K, d]
 
@@ -127,6 +147,21 @@ class SSMMagma(nn.Module):
         use_sem: bool = True,
         # mean prediction injection: predict y as base mean + residual scale
         use_node_bias: bool = True,
+        # SSM-Magma is a standalone forecaster, NOT a frozen-trunk residual,
+        # so expert heads default to PyTorch's standard init. The DiSR-Mamba
+        # σ=1e-3 default would clip the experts to near-zero output and lock
+        # the model into pure-persistence mode (verified empirically).
+        head_init_std: Optional[float] = None,
+        # Persistent shortcut and per-(sensor, horizon) bias act as the
+        # baseline the experts deviate from. Both default ON but become
+        # ablation knobs.
+        use_persistent_shortcut: bool = True,
+        # Adaptive embedding: a [T_in, N, d_adp_emb] learnable tensor that
+        # carries per-(time, sensor) identity. Each expert projects it
+        # through its own basis and adds it to the per-mode features.
+        # This is the analogue of STAEformer's adaptive embedding, the
+        # single biggest source of model expressiveness on METR-LA.
+        d_adp_emb: int = 24,
     ):
         super().__init__()
         self.n_nodes = n_nodes
@@ -136,6 +171,22 @@ class SSMMagma(nn.Module):
         self.experts = nn.ModuleDict()
         self._expert_names: List[str] = []
 
+        # STAEformer-style adaptive embedding indexed by *time-of-day bin*
+        # (not by window-position). Shape: [steps_per_day, N, d_adp_emb].
+        # At forward time we index by the input window's tod_idx so the same
+        # absolute time-of-day always gets the same per-sensor embedding,
+        # regardless of where it appears within the input window. This is
+        # what gives STAEformer its representational power on METR-LA, and
+        # what fixes the position-indexed-overfitting we observed earlier.
+        self.d_adp_emb = d_adp_emb
+        self.steps_per_day = 288
+        if d_adp_emb > 0:
+            self.adaptive_emb = nn.Parameter(
+                0.02 * torch.randn(self.steps_per_day, n_nodes, d_adp_emb)
+            )
+        else:
+            self.adaptive_emb = None
+
         if use_sym:
             assert U_sym is not None, "use_sym requires U_sym"
             self.experts["sym_spectral"] = SymmetricSpectralExpert(
@@ -144,6 +195,8 @@ class SSMMagma(nn.Module):
                 d_model=d_model, n_layers=n_layers,
                 d_state=d_state, d_conv=d_conv, expand=expand,
                 dropout=dropout, mode_axis=biaxis_mode_axis,
+                head_init_std=head_init_std,
+                d_adp_emb=d_adp_emb,
             )
             self._expert_names.append("sym_spectral")
 
@@ -155,6 +208,8 @@ class SSMMagma(nn.Module):
                 d_model=d_model, n_layers=n_layers,
                 d_state=d_state, d_conv=d_conv, expand=expand,
                 dropout=dropout, mode_axis=biaxis_mode_axis,
+                head_init_std=head_init_std,
+                d_adp_emb=d_adp_emb,
             )
             self._expert_names.append("mag_spectral")
 
@@ -169,6 +224,8 @@ class SSMMagma(nn.Module):
                 d_model=d_model, n_layers=n_layers,
                 d_state=d_state, d_conv=d_conv, expand=expand,
                 dropout=dropout, mode_axis=biaxis_mode_axis,
+                head_init_std=head_init_std,
+                d_adp_emb=d_adp_emb,
             )
             self._expert_names.append("semantic_spectral")
         else:
@@ -189,7 +246,7 @@ class SSMMagma(nn.Module):
         # "no change" baseline. The experts learn the *delta* from this in
         # a single-step regression (analogous to STAEformer's residual but
         # *trained end-to-end* not as a frozen-trunk add-on).
-        self.use_persistent_shortcut = True
+        self.use_persistent_shortcut = use_persistent_shortcut
 
         # router
         if use_router:
@@ -225,9 +282,21 @@ class SSMMagma(nn.Module):
         Returns either a tensor [B, T_out, N] (default) or, if
         `return_experts=True`, a dict {y_pred, per_expert, gate, alpha, aux}.
         """
+        # Index the TOD-conditioned adaptive embedding once per forward.
+        # tod is in [0,1); convert to 5-min bins in [0, steps_per_day).
+        if self.adaptive_emb is not None:
+            tod_idx = (tod * self.steps_per_day).long().clamp(
+                0, self.steps_per_day - 1)                              # [B, T_in]
+            adp_batch = self.adaptive_emb[tod_idx]                      # [B, T_in, N, d_adp]
+        else:
+            adp_batch = None
+
         per_expert = []
         for name in self._expert_names:
-            per_expert.append(self.experts[name](x_norm, tod, dow))
+            per_expert.append(
+                self.experts[name](x_norm, tod, dow,
+                                   adaptive_emb=adp_batch)
+            )
 
         E = len(per_expert)
         stacked = torch.stack(per_expert, dim=-1)                # [B, T_out, N, E]
@@ -302,4 +371,7 @@ def build_ssm_magma(cfg: dict,
         use_mag=bool(m.get("use_mag", True)),
         use_sem=bool(m.get("use_sem", True)),
         use_node_bias=bool(m.get("use_node_bias", True)),
+        use_persistent_shortcut=bool(m.get("use_persistent_shortcut", True)),
+        head_init_std=m.get("head_init_std", None),
+        d_adp_emb=int(m.get("d_adp_emb", 24)),
     )

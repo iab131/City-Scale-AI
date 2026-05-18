@@ -54,6 +54,8 @@ class _SpectralExpertBase(nn.Module):
         dropout: float = 0.1,
         mode_axis: bool = True,
         input_channels: int = 1,
+        head_init_std: Optional[float] = 1.0e-3,
+        d_adp_emb: int = 0,
     ):
         super().__init__()
         self.n_nodes = n_nodes
@@ -61,24 +63,39 @@ class _SpectralExpertBase(nn.Module):
         self.out_steps = out_steps
         self.d_model = d_model
         self.input_channels = input_channels
+        self.d_adp_emb = d_adp_emb
 
         self.in_proj = nn.Linear(input_channels, d_model)
         self.tod_embed = nn.Embedding(288, d_model // 4)
         self.dow_embed = nn.Embedding(7, d_model // 4)
         self.feat_proj = nn.Linear(d_model + d_model // 2, d_model)
 
+        # Adaptive embedding projector: takes [..., d_adp_eff] per-mode
+        # adaptive features (after spectral projection) and lifts them to
+        # d_model so they can be added to `h`. d_adp_eff = d_adp_emb for
+        # real bases (sym/sem), 2*d_adp_emb for the complex magnetic basis
+        # (each adp channel projects to Re|Im).
+        if d_adp_emb > 0:
+            d_adp_eff = d_adp_emb * input_channels
+            self.adp_proj = nn.Linear(d_adp_eff, d_model)
+        else:
+            self.adp_proj = None
+
         self.block = BiAxisMambaBlock(
             d_model=d_model, n_layers=n_layers,
             d_state=d_state, d_conv=d_conv, expand=expand,
             dropout=dropout, mode_axis=mode_axis,
         )
-        # Head: per spectral mode, map T_in*D -> T_out*output_channels
-        # (output_channels = input_channels; sym=1, magnetic=2 for re/im).
-        # Small-std init keeps the initial residual ≈ 0 while preserving
-        # gradient flow back into the scan layers (d(out)/d(h)=W).
+        # Head: per spectral mode, map T_in*D -> T_out*output_channels.
+        # With `head_init_std` set (DiSR default = 1e-3), the initial output
+        # is near-zero so a frozen trunk dominates while gradients still
+        # flow into the scan layers. With `head_init_std=None`, we keep
+        # PyTorch's default Linear init — needed for SSM-Magma where the
+        # expert IS the predictor, not a residual.
         self.head = nn.Linear(in_steps * d_model, out_steps * input_channels)
-        nn.init.normal_(self.head.weight, mean=0.0, std=1.0e-3)
-        nn.init.zeros_(self.head.bias)
+        if head_init_std is not None:
+            nn.init.normal_(self.head.weight, mean=0.0, std=head_init_std)
+            nn.init.zeros_(self.head.bias)
 
     # --- subclasses override ---------------------------------------------
     def _project(self, x_norm: torch.Tensor) -> torch.Tensor:
@@ -86,12 +103,21 @@ class _SpectralExpertBase(nn.Module):
 
     def _unproject(self, z_out: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
+
+    def _project_adp(self, adp: torch.Tensor) -> torch.Tensor:
+        """Project a batched adaptive embedding [B, T_in, N, d_adp] through
+        this expert's spectral basis to [B, T_in, K, d_adp_eff]. Subclass
+        override when the basis is complex (magnetic)."""
+        raise NotImplementedError
     # ---------------------------------------------------------------------
 
     def forward(self, x_norm: torch.Tensor, tod: torch.Tensor,
-                dow: torch.Tensor) -> torch.Tensor:
+                dow: torch.Tensor,
+                adaptive_emb: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         x_norm: [B, T_in, N]   tod: [B, T_in]   dow: [B, T_in]
+        adaptive_emb: optional [T_in, N, d_adp_emb] learnable per-(time, sensor)
+            features projected through the expert's basis and added to h.
         returns Delta_Y_norm: [B, T_out, N]
         """
         B, T_in, N = x_norm.shape
@@ -110,6 +136,13 @@ class _SpectralExpertBase(nn.Module):
         h = torch.cat([h, tod_e, dow_e], dim=-1)
         h = self.feat_proj(h)                                           # [B, T_in, K, d]
 
+        # 2b) optional adaptive-embedding side channel projected through
+        # this expert's basis (this is the "STAEformer-class memory" hook).
+        if adaptive_emb is not None and self.adp_proj is not None:
+            adp_spec = self._project_adp(adaptive_emb)                  # [B, T_in, K, d_adp_eff]
+            adp_feat = self.adp_proj(adp_spec)                          # [B, T_in, K, d_model]
+            h = h + adp_feat
+
         # 3) bi-axis Mamba over (T, K)
         h = self.block(h)                                               # [B, T_in, K, d]
 
@@ -126,11 +159,15 @@ class _SpectralExpertBase(nn.Module):
 class SymmetricSpectralExpert(_SpectralExpertBase):
     """Symmetric Laplacian basis (real-valued)."""
 
-    def __init__(self, n_nodes: int, U_sym: torch.Tensor, **kwargs):
+    def __init__(self, n_nodes: int, U_sym: torch.Tensor,
+                 head_init_std: Optional[float] = 1.0e-3,
+                 d_adp_emb: int = 0, **kwargs):
         """
         U_sym: [N, K] real eigenvectors, registered as a non-trainable buffer.
         """
-        super().__init__(n_nodes=n_nodes, input_channels=1, **kwargs)
+        super().__init__(n_nodes=n_nodes, input_channels=1,
+                         head_init_std=head_init_std,
+                         d_adp_emb=d_adp_emb, **kwargs)
         assert U_sym.dim() == 2 and U_sym.shape[0] == n_nodes
         self.register_buffer("U_sym", U_sym.float(), persistent=False)
 
@@ -141,6 +178,10 @@ class SymmetricSpectralExpert(_SpectralExpertBase):
     def _unproject(self, z: torch.Tensor) -> torch.Tensor:
         return torch.einsum("nk,btkc->btnc", self.U_sym, z)
 
+    def _project_adp(self, adp: torch.Tensor) -> torch.Tensor:
+        # adp: [B, T_in, N, d_adp] -> [B, T_in, K, d_adp]
+        return torch.einsum("nk,btne->btke", self.U_sym, adp)
+
 
 class MagneticSpectralExpert(_SpectralExpertBase):
     """
@@ -149,11 +190,15 @@ class MagneticSpectralExpert(_SpectralExpertBase):
     input_channels=2 to a real-valued bi-axis Mamba.
     """
 
-    def __init__(self, n_nodes: int, U_mag: torch.Tensor, **kwargs):
+    def __init__(self, n_nodes: int, U_mag: torch.Tensor,
+                 head_init_std: Optional[float] = 1.0e-3,
+                 d_adp_emb: int = 0, **kwargs):
         """
         U_mag: complex [N, K]
         """
-        super().__init__(n_nodes=n_nodes, input_channels=2, **kwargs)
+        super().__init__(n_nodes=n_nodes, input_channels=2,
+                         head_init_std=head_init_std,
+                         d_adp_emb=d_adp_emb, **kwargs)
         assert torch.is_complex(U_mag) and U_mag.shape[0] == n_nodes
         # Store real / imag halves as float buffers
         self.register_buffer("U_real", U_mag.real.contiguous().float(),
@@ -184,6 +229,15 @@ class MagneticSpectralExpert(_SpectralExpertBase):
         out_r = torch.einsum("nk,btk->btn", Ur, zr) - torch.einsum("nk,btk->btn", Ui, zi)
         return out_r.unsqueeze(-1)                                      # [B, T, N, 1]
 
+    def _project_adp(self, adp: torch.Tensor) -> torch.Tensor:
+        # adp: real [B, T_in, N, d_adp]. Complex projection Z = U^H @ adp.
+        # U^H = (U_real - i U_imag)^T  =>  (zr =  U_real^T @ adp,
+        #                                   zi = -U_imag^T @ adp).
+        # Split [Re | Im] into 2 channels along the d_adp axis.
+        zr = torch.einsum("nk,btne->btke", self.U_real, adp)
+        zi = -torch.einsum("nk,btne->btke", self.U_imag, adp)
+        return torch.cat([zr, zi], dim=-1)                              # [B, T_in, K, 2*d_adp]
+
 
 class LearnedBasisExpert(_SpectralExpertBase):
     """
@@ -193,8 +247,9 @@ class LearnedBasisExpert(_SpectralExpertBase):
     """
 
     def __init__(self, n_nodes: int, k: int, init_from: Optional[torch.Tensor] = None,
-                 **kwargs):
-        super().__init__(n_nodes=n_nodes, input_channels=1, **kwargs)
+                 head_init_std: Optional[float] = 1.0e-3, **kwargs):
+        super().__init__(n_nodes=n_nodes, input_channels=1,
+                         head_init_std=head_init_std, **kwargs)
         if init_from is None:
             U0 = torch.randn(n_nodes, k) / math.sqrt(n_nodes)
         else:
@@ -206,6 +261,10 @@ class LearnedBasisExpert(_SpectralExpertBase):
 
     def _unproject(self, z: torch.Tensor) -> torch.Tensor:
         return torch.einsum("nk,btkc->btnc", self.U_learn, z)
+
+    def _project_adp(self, adp: torch.Tensor) -> torch.Tensor:
+        # adp: [B, T_in, N, d_adp] -> [B, T_in, K, d_adp]
+        return torch.einsum("nk,btne->btke", self.U_learn, adp)
 
     def ortho_penalty(self) -> torch.Tensor:
         # ||U^T U - I||_F^2

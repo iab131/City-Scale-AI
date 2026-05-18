@@ -56,6 +56,7 @@ def parse_args():
     p.add_argument("--k_neighbors", type=int, default=12)
     p.add_argument("--n_clusters", type=int, default=12)
     p.add_argument("--alpha_init", type=float, default=1.0)
+    p.add_argument("--d_adp_emb", type=int, default=24)
 
     p.add_argument("--use_sym", action="store_true", default=True)
     p.add_argument("--use_mag", action="store_true", default=True)
@@ -190,6 +191,7 @@ def main():
             "n_clusters": args.n_clusters, "alpha_init": args.alpha_init,
             "use_sym": args.use_sym, "use_mag": args.use_mag,
             "use_sem": args.use_sem, "use_router": args.use_router,
+            "d_adp_emb": args.d_adp_emb,
         },
     }
     model = build_ssm_magma(cfg, U_sym=U_sym, U_mag=U_mag,

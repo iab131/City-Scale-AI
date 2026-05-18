@@ -172,7 +172,8 @@ class TemporalMambaResidual(nn.Module):
     def __init__(self, n_nodes: int, in_steps: int = 12, out_steps: int = 12,
                  d_model: int = 64, n_layers: int = 2,
                  d_state: int = 16, d_conv: int = 4, expand: int = 2,
-                 dropout: float = 0.1):
+                 dropout: float = 0.1,
+                 head_init_std: Optional[float] = 1.0e-3):
         super().__init__()
         self.n_nodes = n_nodes
         self.in_steps = in_steps
@@ -189,13 +190,13 @@ class TemporalMambaResidual(nn.Module):
             for _ in range(n_layers)
         ])
         # Mixed projection over T_in*D -> T_out, per STAEformer's head.
-        # Small-std init keeps the initial residual ≈ 0 (so the frozen trunk
-        # stays dominant) while still letting gradients flow back through W
-        # to the Mamba scans. A pure zero-init kills d(out)/d(h)=W=0 and the
-        # scan layers below never receive gradient.
+        # head_init_std set (DiSR default 1e-3): residual≈0 at init so the
+        # frozen trunk dominates. head_init_std=None: default PyTorch init —
+        # needed when this is the primary predictor (SSM-Magma).
         self.head = nn.Linear(in_steps * d_model, out_steps)
-        nn.init.normal_(self.head.weight, mean=0.0, std=1.0e-3)
-        nn.init.zeros_(self.head.bias)
+        if head_init_std is not None:
+            nn.init.normal_(self.head.weight, mean=0.0, std=head_init_std)
+            nn.init.zeros_(self.head.bias)
 
     def forward(self, x_norm: torch.Tensor, tod: torch.Tensor,
                 dow: torch.Tensor) -> torch.Tensor:
