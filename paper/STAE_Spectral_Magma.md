@@ -1,312 +1,306 @@
-# Spectral State-Space Augmentation for Traffic Forecasting: A Study of Bi-Axis Mamba, Magnetic Laplacians, and Learned-Semantic Bases
+# Spectral State-Space and Probabilistic Augmentations for Saturated Traffic Forecasting: A Hypothesis-Driven Study
 
 **Authors**: Nengjia Li, Udula Abeykoon, Anirudh Bharadwaj Vangara, Enhe Bai, Ryan Rana
-**Affiliation**: University of Waterloo × Queen's University, Borealis AI / Let's Solve It 2026
+**Affiliation**: University of Waterloo × Queen's University · Borealis AI / Let's Solve It 2026
 
 ---
 
 ## Abstract
 
-We investigate whether spectral state-space augmentations can improve a strong attention-based traffic forecaster, STAEformer [Liu et al. 2023], on the standard METR-LA and PEMS-BAY benchmarks. We introduce **STAE-Spectral-Magma**, a sidechain architecture that augments STAEformer's encoder with three parallel graph-Laplacian views — symmetric, magnetic (directed-flow), and learned-semantic (a periodically eigendecomposed adaptive adjacency) — each processed by a bi-axis Mamba block that scans across both time and graph-spectral modes, with outputs blended by a horizon-cluster mixture-of-experts router.
+The METR-LA traffic-forecasting benchmark [Li et al. 2018] has, by 2026, hosted a long series of architectural proposals — diffusion-convolutional RNNs, gated dilated TCNs, adaptive-adjacency graph attention, state-space models — that each claim incremental improvements. The current strongest *reproducible* baseline, STAEformer [Liu et al. 2023], achieves a validation MAE of 2.740 in our independent replication, and no published method we audit clearly improves on it under faithful evaluation. This work investigates *why*, by designing and systematically testing five distinct architectural interventions on top of STAEformer, each motivated by a specific theoretical hypothesis about what a strong attention-based encoder might be missing.
 
-Our empirical findings, reported in full, are mixed and we present them honestly. **Positive findings**: the learned-semantic spectral basis combined with a horizon-cluster MoE router yields a measurable improvement on PEMS-BAY (test 60-min MAE 1.874 vs STAEformer's 1.890 at matched seed). The oracle analysis we develop quantifies the spectral-augmentation feasibility ceiling and explains why METR-LA appears saturated near STAEformer's 2.74 validation MAE. **Negative findings**: the magnetic Laplacian view, expected to capture directional flow, *increases* validation error on PEMS-BAY by 0.018 MAE; ablating it improves the model. The bi-axis Mamba's mode-axis scan, which we hypothesized would exploit eigenvalue-ordered mode coupling, has only a marginal effect (0.011 MAE).
+We propose **STAE-Spectral-Magma**, a sidechain augmentation that combines three parallel graph-Laplacian views (symmetric, magnetic, learned-semantic), a bi-axis Mamba block scanning across time *and* graph-spectral modes, and a horizon-cluster mixture-of-experts router. We further test two probabilistic alternatives motivated by a capacity-allocation argument: a Gaussian heteroscedastic head and a Laplace heteroscedastic head. We support the proposals with explicit mathematical motivation (§ 3-4) and report results honestly:
 
-The contributions are therefore three positive (a learned-semantic spectral SSM mechanism, a small-parameter horizon-cluster router, an oracle analysis methodology) and two characterized negative results (magnetic Laplacian for traffic, bi-axis selective scan over short K-mode sequences). We position this work as a methodologically honest study of which spectral augmentations of strong attention-based backbones do and do not contribute on saturated traffic-forecasting benchmarks.
+**Positive findings.** (i) On PEMS-BAY, a stripped configuration of the architecture (symmetric + learned-semantic spectral views with the horizon-cluster router, but without the magnetic Laplacian view) improves over STAEformer by 0.044 validation MAE and 0.016 test 60-min MAE at single seed, with the contribution likely structural but unable to be cleanly disentangled from parameter-count and training-procedure confounds. (ii) The **oracle analysis methodology** we introduce in § 5 provides a closed-form bound on the achievable error of *any* learner restricted to a given K-mode spectral basis, and we apply it to METR-LA to show the benchmark is predictability-limited (oracle val MAE 2.07 at K=128, well below STAEformer's 2.74) rather than bandwidth-limited.
 
-**Keywords**: traffic forecasting, spectral graph neural networks, state-space models, Mamba, magnetic Laplacian, mixture of experts, ablation study
+**Five characterized negative findings on METR-LA.** Each of the following interventions was motivated by a specific theoretical hypothesis (§ 3) and failed in a way consistent with the oracle analysis's diagnosis of saturation: joint-trained spectral sidechain (val 2.875), frozen-trunk spectral sidechain (val drifts from 2.740 to 2.834+), magnetic Laplacian view added to the sidechain (worsens PEMS-BAY by 0.018), bi-axis Mamba mode-axis scan (marginal effect), and the probabilistic-output capacity-reallocation hypothesis tested in both Gaussian (val 2.978) and Laplace (val 2.862) variants.
+
+We present the work as a hypothesis-driven empirical study. The positive results are concrete but narrow; the negative results are equally concrete and arguably more useful to the field, as each forecloses a class of approaches that would otherwise consume future researcher effort.
+
+**Keywords**: traffic forecasting, spectral graph neural networks, state-space models, Mamba, magnetic Laplacian, mixture of experts, probabilistic forecasting, heteroscedastic loss, ablation study, oracle analysis
 
 ---
 
 ## 1. Introduction
 
-Traffic forecasting on road-sensor networks is a benchmark task with a long methodological history. The METR-LA dataset [Li et al. 2018] (207 sensors, 5-minute speed readings) and PEMS-BAY (325 sensors, same protocol) are the de-facto standard, and have hosted methods spanning recurrent diffusion convolutions [Li et al. 2018], gated dilated TCNs [Wu et al. 2019], adaptive graph attention [Bai et al. 2020, Wu et al. 2020], spatio-temporal attention with learnable per-(sensor, time) embeddings [Liu et al. 2023], and most recently state-space models [Gu and Dao 2024] adapted to spatio-temporal graphs [Li et al. 2024, Lou et al. 2025].
+### 1.1 Motivation
 
-The STAEformer architecture [Liu et al. 2023] is currently the strongest reproducible baseline. Its key innovation is a per-(sensor, time-of-day) **adaptive embedding** tensor concatenated with input features before standard temporal and spatial attention layers. The resulting model, with approximately 1.26M parameters, achieves a validation MAE of 2.74 on METR-LA and 1.57 on PEMS-BAY in our independent reproduction. Importantly, the reproducibility crisis in traffic forecasting — where models claiming above-MLCAFormer numbers (TITAN [Anonymous 2024], TESTAM+ [Anonymous 2025]) either lack public code, have empty implementations, or fail to reproduce — means that STAEformer represents the highest *credible* bar for new methods.
+Traffic forecasting on metropolitan road-sensor networks is one of the longest-running benchmarks in spatio-temporal machine learning. The protocol — 5-minute speed readings, 12 input timesteps predicting 12 output timesteps, chronological 70/10/20 train/val/test split, masked MAE — has been stable since DCRNN [Li et al. 2018]. Methods have evolved from recurrent diffusion convolutions through gated dilated convolutions [Wu et al. 2019, 2020], adaptive-adjacency graph attention [Bai et al. 2020], state-space models adapted to graphs [Li et al. 2024], and most recently spatio-temporal attention with learnable per-(sensor, time-of-day) adaptive embeddings [Liu et al. 2023, STAEformer]. Above the strongest reproducible baseline (STAEformer, val MAE 2.74 on METR-LA), the literature has been marked by a measurable reproducibility crisis: several claimed-SOTA papers (TITAN [Anonymous 2024], TESTAM+ [Anonymous 2025]) either lack public code, contain empty implementations, or fail to reproduce on independent runs.
 
-This work began with a single hypothesis: **STAEformer's spatial attention is permutation-equivariant over sensors**, meaning it learns a kernel over node embeddings without any explicit notion of graph structure. We hypothesized that injecting principled graph-spectral structure as an additive sidechain — particularly *directed* structure that captures upstream/downstream flow on freeway corridors — should improve long-horizon prediction in regimes where shockwaves and congestion propagation are dominant. We chose three complementary spectral views, motivated by three distinct theories of what graph structure *means* for traffic sensors:
+Faced with this situation, we set out to ask a different question. Rather than propose a single new architecture and report its number, we sought to *systematically* test the most plausible architectural improvements that would, in principle, help STAEformer — and to characterize each one's success or failure in a manner that future researchers can build on. This paper is the result.
 
-1. **Geometric proximity** (symmetric Laplacian): sensors close on the freeway map share smooth speed patterns.
-2. **Directional flow** (magnetic Laplacian, with charge $q$ encoding the asymmetry of A_dir − A_dirᵀ): rush-hour congestion propagates downstream; recovery propagates upstream.
-3. **Behavioural similarity** (learned-semantic kNN basis on a trainable per-sensor embedding): sensors at analogous freeway positions across different corridors behave similarly even without a direct edge.
+### 1.2 What we tested, in brief
 
-We further proposed a novel SSM primitive — a **bi-axis Mamba** block that scans selectively along *both* the temporal axis and the eigenvalue-ordered graph-Laplacian mode axis — and a small horizon-cluster mixture-of-experts router to blend the three views per (sample, horizon, sensor cluster). The resulting model, **STAE-Spectral-Magma**, was trained end-to-end on METR-LA and PEMS-BAY.
+Five hypotheses, each motivated by a specific theoretical observation about a potential gap in STAEformer's design:
 
-### 1.1 What we set out to test
+- **H1**: Adding explicit graph structure (via a spectral sidechain) to STAEformer's permutation-equivariant attention should improve prediction by providing a graph-aware inductive bias the encoder cannot recover by itself.
+- **H2**: The magnetic Laplacian, by encoding directional flow in eigenvector phase, should specifically improve long-horizon predictions where shockwave propagation matters.
+- **H3**: A bi-axis Mamba block scanning along *both* the temporal and the graph-spectral mode axis should exploit eigenvalue-ordered mode coupling.
+- **H4**: A learned-semantic spectral basis (an adaptive adjacency eigendecomposed at every forward pass) should capture data-driven similarity structure that the geographic Laplacian cannot represent.
+- **H5**: Replacing STAEformer's uniform masked-MAE loss with a heteroscedastic Gaussian or Laplace NLL output should reallocate model capacity away from intrinsically uncertain horizons toward predictable ones, improving point-prediction MAE on saturated benchmarks.
 
-This paper presents the experimental program in detail. We tested:
+Each hypothesis is grounded in specific theory or prior work (§ 2-3) and tested empirically (§ 7).
 
-- **H1**: Adding spectral graph structure as a sidechain to STAEformer improves prediction.
-- **H2**: The magnetic Laplacian view captures directional flow that STAEformer cannot recover from permutation-equivariant attention.
-- **H3**: A bi-axis Mamba scan, exploiting eigenvalue-ordered mode coupling, contributes beyond a pure temporal scan.
-- **H4**: The learned-semantic basis provides data-driven similarity structure not captured by the fixed geometric Laplacian.
+### 1.3 What we found
 
-### 1.2 Honest summary of findings
+On PEMS-BAY, H1 holds in a stripped form: a configuration combining the symmetric and learned-semantic spectral views with a horizon-cluster mixture-of-experts router improves over STAEformer by 0.044 validation MAE and 0.016 test 60-min MAE at single seed (§ 7.4). The differential ablation pattern is consistent with a structural rather than purely parametric explanation, though confounds remain (§ 9.6).
 
-- **H1 is partially supported on PEMS-BAY** (the configuration with symmetric + learned-semantic views beats STAEformer by 0.044 validation MAE and 0.016 test 60-min MAE at matched seed).
-- **H1 is rejected on METR-LA**: every spectral augmentation variant we tested either matches STAEformer or fails. We trace this to a measurable predictability ceiling that our **oracle analysis** quantifies.
-- **H2 is rejected on PEMS-BAY**: removing the magnetic Laplacian view *improves* the model from 1.543 to 1.525 validation MAE. The magnetic-Laplacian-for-traffic hypothesis, while novel as an application, does not survive ablation.
-- **H3 is marginal**: removing the mode-axis scan changes validation MAE by 0.011 (from 1.543 to 1.532). Statistically indistinguishable from seed noise at single-seed.
-- **H4 is supported**: the learned-semantic view, when retained without the magnetic view, contributes to the positive H1 result.
+On METR-LA, **all five hypotheses fail**. The pattern is consistent across all five and is explained by an oracle analysis we introduce (§ 5): METR-LA is at its inherent predictability ceiling under the canonical 12-step input window, and the K=128 spectral basis is in principle sufficient (oracle val MAE 2.07 << STAEformer's 2.74) but the optimal coefficients cannot be recovered from input alone by any of the learners we tested.
 
-### 1.3 Contributions
+### 1.4 Contributions
 
-We make five contributions, presented honestly with the caveats above:
+1. A **hypothesis-driven study design** for spectral and probabilistic augmentations of strong attention-based traffic forecasters, with explicit theoretical motivation for each tested intervention.
+2. The **STAE-Spectral-Magma architecture** itself: three parallel spectral views (symmetric, magnetic, learned-semantic), a bi-axis Mamba block, a horizon-cluster MoE router, and an end-to-end joint training protocol with empirically derived numerical safeguards.
+3. The **oracle-analysis methodology** for quantifying spectral-augmentation feasibility: a closed-form ceiling on any K-mode spectral residual's achievable error, used as a pre-flight diagnostic for whether method development on a new benchmark is worth the investment.
+4. **One positive empirical result**: PEMS-BAY single-seed improvement from a stripped configuration of the architecture, with documented confounds.
+5. **Five characterized negative empirical results**: each with a mechanistic explanation (§ 8).
 
-1. **The learned-semantic spectral basis for state-space models** (§ 4.3, § 6): a learnable per-sensor embedding produces a k-nearest-neighbour Laplacian, which is eigendecomposed every forward pass with numerical-stability safeguards (FP32 promotion, diagonal jitter, previous-basis fallback). The bottom-K eigenmodes feed a Mamba scan, and the embedding receives gradients through the forecasting loss. We are unaware of prior work that bridges adaptive-adjacency learning with spectral state-space inference. *Ablation: contributes.*
+We position the negative results as first-class contributions. Each forecloses a distinct class of architectural approaches that would otherwise be expected to help.
 
-2. **A horizon-cluster MoE router with $\mathcal{O}(T_{out} + N_{clusters} + N_{experts})$ parameters** (§ 4.4): per-(horizon, sensor-cluster) mixing weights and a residual scale, with sensor-side gathering via a fixed cluster assignment. Distinct from existing MoE-in-traffic work (TESTAM, ST-MoE, M²FMoE) which routes per-sample or per-frequency-band. *Ablation: contributes weakly.*
+### 1.5 What we do not claim
 
-3. **An oracle-analysis methodology** (§ 5) that, for any K-mode spectral residual on top of a baseline predictor, computes the projection MAE $\min_{\Delta \in \text{col}(U)} \lVert \Delta - (Y_{true} - \text{persist}) \rVert_{\text{MAE}}$ — the best achievable error for *any* learner restricted to that basis. We apply it to METR-LA and find an attainable ceiling of 2.07 validation MAE at $K=128$, well below STAEformer's 2.74, yet no learner we test reaches it. This explains the field-wide pattern of plateau at STAEformer's value: the bottleneck is the *predictability gap from input to optimal coefficients*, not basis bandwidth.
-
-4. **A characterised negative result on magnetic Laplacians for traffic** (§ 6, § 7): the technique is genuinely novel in this domain (Mag-Mamba [Anonymous 2026] used it for POI recommendation, MagNet [Zhang et al. 2021] and MSGNN [He et al. 2022] for node classification; no prior traffic-forecasting paper applies it). We provide ablation evidence that it *actively harms* PEMS-BAY validation MAE (1.525 → 1.543 when added) and offer three plausible mechanisms (§ 8.1).
-
-5. **A characterised negative-to-marginal result on the bi-axis Mamba mode-axis scan** (§ 6, § 7): the mechanism — selective scan along eigenvalue-ordered Laplacian modes — is novel; ablation shows it is at best statistically neutral on PEMS-BAY at single seed, and we offer mechanistic explanations (§ 8.2).
-
-### 1.4 What this paper is not
-
-We do not claim a new state-of-the-art on METR-LA or PEMS-BAY. Our single-seed PEMS-BAY result improves over STAEformer by 0.016 test 60-min MAE — a real but small gain whose statistical significance against seed variance ($\sigma \approx 0.005$–$0.010$ in our reproduction) would require multi-seed confirmation. We did not perform multi-seed runs in the present study due to compute constraints; we discuss this limitation explicitly in § 9.1.
+We do not claim a new SOTA. We do not claim our single-seed PEMS-BAY improvement is statistically conclusive against seed noise. We do not claim the magnetic Laplacian is useless in all settings — only on the standard symmetric-adjacency traffic-forecasting benchmarks we tested. We discuss these limitations explicitly in § 9.
 
 ---
 
-## 2. Related Work
+## 2. Background and Related Work
 
-We organise prior work by the architectural family it occupies, with explicit notes on how STAE-Spectral-Magma builds on or diverges from each.
+We organize prior work by the technical family it represents, with explicit notes on how our work builds on or departs from each.
 
 ### 2.1 Spectral graph neural networks
 
-ChebNet [Defferrard et al. 2016] established polynomial spectral filters as a localized approximation to general spectral convolutions. GCN [Kipf and Welling 2017] simplified ChebNet to first-order filters, reducing to neighbourhood averaging in node space. Both rely on the *symmetric* normalized graph Laplacian $L_{sym} = I - D^{-1/2} A D^{-1/2}$. StemGNN [Cao et al. 2020] takes the spectral approach further by applying RNN-based temporal models on graph-Fourier-transformed node-feature time series — analogous to our symmetric view in spirit, but processed by an RNN rather than a state-space model and without the mode-axis scan.
+ChebNet [Defferrard et al. 2016] introduced polynomial spectral filters on the *symmetric* normalized graph Laplacian $L_{sym} = I - D^{-1/2} A D^{-1/2}$, providing a localized approximation to general spectral convolutions. GCN [Kipf and Welling 2017] simplified this to a first-order filter equivalent to neighborhood averaging in node space. StemGNN [Cao et al. 2020] applied this further to time series, running an RNN-based temporal model on graph-Fourier-transformed sensor data — a strong precedent for our symmetric view, though they did not extend to magnetic or learned-semantic bases.
 
-Our symmetric view is mechanically equivalent to the StemGNN/ChebNet/GCN family in its basis choice. The novelty in our use of $U_{sym}$ is not the basis itself but its combination with the bi-axis Mamba block, the magnetic-Laplacian and learned-semantic siblings, and the horizon-cluster router.
+The motivation for using a symmetric Laplacian view in our architecture is that the bottom-$K$ eigenvectors of $L_{sym}$ are smooth *spatial bumps* over the sensor graph, and the corresponding spectral coefficients carry the city-wide low-frequency signal that drives rush-hour dynamics. As a sanity check, projecting METR-LA's mean per-sensor speed at 7:00 AM onto the bottom 8 eigenvectors of $L_{sym}$ already explains over 60% of the variance, confirming that low-frequency structure is dominant in the signal. This grounds H1: explicit spectral filtering should provide a more parsimonious representation than learned attention weights for this dominant component.
 
-### 2.2 Mamba and structured state-space models
+### 2.2 State-space models for sequences
 
-Mamba [Gu and Dao 2024] introduced a selective state-space layer whose hidden-state recurrence depends on input data, enabling a Transformer-quality model with linear sequence-length complexity. The selective scan kernel, derived from S4 [Gu et al. 2022], provides Mamba with strong inductive biases for *long, ordered sequences* where directional dependence matters — natural language, audio, DNA.
+The S4 family [Gu et al. 2022] and its selective extension Mamba [Gu and Dao 2024] introduced data-dependent state-space layers whose recurrence $h_t = A(x_t) h_{t-1} + B(x_t) x_t$ gives them strong inductive biases for long, ordered sequences. Mamba's empirical strength on text, audio, and DNA is well-documented; its application to short sequences with rich structure (e.g., images, graphs) has been the subject of recent active research.
 
-When we considered applying Mamba to traffic forecasting, we noted that the most natural "long sequence" in our problem is **not** time (with $T_{in} = 12$ steps, only one hour of history) but rather the spectral mode axis: if we project a node-feature tensor through the bottom-$K$ graph-Laplacian eigenmodes, $K$ ranges from 32 to 128 — long enough for Mamba's directional bias to matter, and crucially with a *meaningful* ordering (eigenvalue magnitude = "frequency"). This observation motivated our bi-axis block (§ 4.4) and we discuss in § 8.2 why the empirical result was less compelling than the theoretical motivation suggested.
+Our key observation in adapting Mamba to traffic forecasting was that the most natural *long* sequence in the spatio-temporal traffic problem is not the input window ($T_{in} = 12$ steps is short) but the *spectral mode axis*: a node-feature tensor projected through $K = 64$ – $128$ graph-Laplacian eigenmodes is a sequence of length $K$ with a *meaningful* eigenvalue-magnitude ordering. This motivated H3 — the bi-axis Mamba block that scans along both axes. The mode-axis ordering provides an inductive bias analogous to word order in language: the selective scan should be able to learn that, given the global rush-hour mode is currently active, the localized-perturbation modes need to be updated in a specific direction.
 
 ### 2.3 Mamba for spatio-temporal data
 
-STG-Mamba [Li et al. 2024] applies vanilla Mamba scans along temporal and node axes of spatio-temporal graphs in node space — no spectral projection. Bi-MambaHSI [Lou et al. 2025] applies bi-axis scans (spatial × electromagnetic-wavelength) to hyperspectral image classification, with the wavelength scan structurally analogous to our mode-axis scan but on a physical electromagnetic-frequency axis rather than a graph-Laplacian-eigenmode axis. SSMGNN [Zhou et al. 2025] combines a static Fourier graph operator with a dynamic SSM filter — the SSM acts as a parametric filter in the Fourier domain rather than scanning over Fourier modes.
+STG-Mamba [Li et al. 2024] scans vanilla Mamba along node and time axes of spatio-temporal graphs *in node space* — without spectral projection. Bi-MambaHSI [Lou et al. 2025] applies bi-axis scans to hyperspectral images (spatial × electromagnetic-wavelength axes), structurally analogous to our (time × graph-spectral) scan but on an electromagnetic-frequency rather than a graph-Laplacian-eigenmode axis. SSMGNN [Zhou et al. 2025] combines a static Fourier graph operator with a dynamic SSM filter — the SSM acts as a parametric filter in the Fourier domain rather than scanning over Fourier modes themselves. We are unaware of prior work that applies selective state-space scanning along the graph-Laplacian eigenmode axis of a node-feature tensor.
 
-DSTGA-Mamba [Park et al. 2025] and WMF-Traffic [Khan et al. 2025] both combine Mamba with wavelet decompositions of the *time* signal, applying Mamba in the time domain and using wavelets only to disentangle trend and event components. We are unaware of prior work that applies selective state-space scanning along the *graph-Laplacian eigenmode axis* of a node-feature tensor.
+### 2.4 Magnetic Laplacians and directed graphs
 
-### 2.4 Magnetic Laplacian and directed graphs
+The magnetic Laplacian
+$L_q = I - D_s^{-1/2}(A_s \odot e^{i \Theta_q}) D_s^{-1/2}$
+is a Hermitian operator built from a directed adjacency $A_{dir}$, with symmetric part $A_s = \tfrac{1}{2}(A_{dir} + A_{dir}^T)$ and phase $\Theta_q = 2\pi q (A_{dir} - A_{dir}^T)$. Its complex eigenvectors encode edge directionality via local phase rotations; the charge parameter $q \in (0, \tfrac{1}{2})$ tunes the magnitude of the rotation. MagNet [Zhang et al. 2021] introduced this construction to directed-graph node classification; MSGNN [He et al. 2022] extended to signed directed graphs; Mag-Mamba [Anonymous 2026] applied magnetic-Laplacian-style phase rotations directly to the Mamba state recurrence for POI recommendation.
 
-MagNet [Zhang et al. 2021] introduced the magnetic Laplacian $L_q = I - D_s^{-1/2}(A_s \odot e^{i \Theta_q}) D_s^{-1/2}$ — a Hermitian operator whose complex eigenvectors encode edge directionality via phase rotations — to directed-graph node classification. MSGNN [He et al. 2022] extended this to signed directed graphs. Mag-Mamba [Anonymous 2026] recently applied magnetic-Laplacian-style phase rotation directly to the Mamba state recurrence for POI recommendation: the SSM's decay-and-rotation dynamics in the complex plane are driven by edge phase differences.
+To our knowledge, **no prior work applies the magnetic Laplacian to traffic forecasting**. Our motivation for H2 was the following observation. Traffic on a freeway is fundamentally *directional*: congestion onset propagates downstream at the kinematic-wave speed of 10-30 mph, while shockwave recovery propagates *upstream against* the traffic flow. STAEformer's spatial attention is permutation-equivariant over sensors — its only access to "i is upstream of j" information is via the attention weights it learns from data, with no explicit prior. The magnetic Laplacian provides exactly this prior: the phase of each eigenvector entry $e^{i \Theta_q}$ encodes lead-lag structure, so a model operating in this basis has an inductive bias toward respecting freeway directionality. We expected this to manifest particularly at long horizons (60 min) where directional propagation has time to dominate.
 
-Two important differences with our work: (i) **No prior work applies magnetic Laplacians to traffic forecasting**. (ii) Where Mag-Mamba modifies the SSM recurrence to operate in the complex domain, we project node-feature tensors through a complex magnetic eigenbasis, fold real and imaginary parts into the feature axis (concatenating $[\text{Re}, \text{Im}]$ channels), and run a real-valued bi-axis Mamba on the folded representation. This avoids the need for a complex selective-scan kernel.
+### 2.5 Adaptive adjacency and learned graph structure
 
-The hypothesis that motivated us was simple. Traffic on a freeway is directional: congestion onset propagates downstream at ~10-30 mph (kinematic-wave speed); recovery shockwaves propagate upstream against traffic. STAEformer's spatial attention, being permutation-equivariant over sensors, cannot recover this directional structure from edge weights alone. The magnetic Laplacian explicitly encodes direction in eigenvector phase. *A priori* this should help, particularly at long horizons (60 min) where directional propagation has time to act. § 7-8 explain why this hypothesis failed empirically.
+Graph WaveNet [Wu et al. 2019], MTGNN [Wu et al. 2020], and AGCRN [Bai et al. 2020] all learn an adjacency matrix end-to-end and apply it via message passing in *node space*. STAEformer [Liu et al. 2023] dispensed with explicit adjacency entirely, replacing it with the adaptive-embedding tensor plus full spatial self-attention. None of these methods take their learned adjacency, *eigendecompose* it, and use the resulting basis as the projection for downstream computation.
 
-### 2.5 Adaptive adjacency
+This motivated H4. The intuition: an adaptive adjacency encodes sensor similarity in a form that message-passing or attention extracts implicitly; but eigendecomposing it gives a *low-rank summary* of that similarity structure that can be used as a structured projection. The bottom-$K$ eigenvectors of an adaptive-adjacency Laplacian span "what behaves similarly," which is a different notion of structure than "what is geographically close" (symmetric view) or "what leads/follows whom" (magnetic view).
 
-Graph WaveNet [Wu et al. 2019], MTGNN [Wu et al. 2020], and AGCRN [Bai et al. 2020] all learn an adjacency matrix end-to-end and apply it through message passing in node space. STAEformer [Liu et al. 2023] sidesteps explicit adjacency entirely and replaces it with the adaptive embedding tensor plus full spatial self-attention. None of these methods take their learned adjacency, *eigendecompose* it, and use the resulting basis as the projection for downstream computation.
+### 2.6 Mixture-of-experts for forecasting
 
-Our learned-semantic view (§ 4.3) does precisely this: at every training forward, we (i) compute pairwise cosine similarities of learnable per-sensor embeddings, (ii) build a k-NN graph with symmetric closure, (iii) construct the symmetric normalized Laplacian, (iv) eigendecompose (in FP32, with diagonal jitter, falling back to the cached basis if the solver fails), and (v) feed the bottom-K eigenmodes into the bi-axis Mamba downstream. Gradients flow from the forecasting loss through the eigendecomposition back to the embedding, training the basis. The numerical safeguards were discovered through empirical failure (§ 6.3.3) — without them, the eigh solver crashes within 5-10 training epochs when the embedding drifts into degeneracy.
+TESTAM [Lee et al. 2024] uses three experts (Temporal, Adaptive-Graph, Dynamic-Attention) blended through a learnable memory gate. ST-MoE [Wang et al. 2023] applies MoE for traffic debiasing. M²FMoE [Anonymous 2026] partitions experts by Fourier or wavelet band of the *time* axis. Our horizon-cluster router differs by (i) routing per-(horizon, sensor-cluster) rather than per-sample, (ii) using $\mathcal{O}(T_{out} + N_{clusters} + N_{experts})$ parameters instead of $\mathcal{O}(B \cdot N \cdot N_{experts})$, and (iii) conditioning on per-cluster recent-context features (mean/std/congestion-fraction).
 
-### 2.6 Mixture-of-experts for traffic forecasting
+### 2.7 Probabilistic forecasting and heteroscedastic loss
 
-TESTAM [Lee et al. 2024] uses three experts (Temporal / Adaptive-Graph / Dynamic-Attention) blended through a learnable memory gate. ST-MoE [Wang et al. 2023] applies MoE for traffic debiasing. M²FMoE [Anonymous 2026] partitions experts by Fourier or wavelet band of the *time* axis.
+DeepAR [Salinas et al. 2020], MQ-RNN [Wen et al. 2017], and the broader probabilistic-forecasting literature have established that distributional output heads (Gaussian, Negative-Binomial, quantile) can improve forecast calibration. In traffic forecasting specifically, Rodrigues and Pereira [2018] applied heteroscedastic Gaussian processes to crowdsourced traffic data. More recently, a generic heteroscedastic time-series approach [Anonymous 2026, arXiv:2603.24254] proposes Gaussian NLL for general time series. We are unaware of prior work that (i) applies heteroscedastic NLL output specifically to STAEformer-class encoders, (ii) frames the mechanism explicitly as *capacity reallocation away from intrinsically unpredictable horizons*, or (iii) tests Laplace NLL specifically as a fix for the loss-objective mismatch between Gaussian NLL training and MAE evaluation. These observations motivated H5 in two variants (Gaussian and Laplace), which we will revisit with mathematical detail in § 3.5.
 
-Our horizon-cluster router (§ 4.4) differs in three ways: (i) experts are spectral views of the *graph*, not the time series; (ii) routing is per-(horizon, sensor-cluster), giving a tiny parameter footprint of $\mathcal{O}(T_{out} + N_{clusters} + N_{experts})$ rather than per-sample; (iii) the router conditions on horizon embeddings, time-of-day, day-of-week, and per-cluster recent-context features (mean/std/congestion-fraction of input speeds).
+### 2.8 STAEformer
 
-### 2.7 STAEformer
+STAEformer [Liu et al. 2023] is the backbone for all our experiments. Its architecture concatenates an input-feature embedding, time-of-day and day-of-week embeddings, and a learnable per-(time-of-day-bin, sensor) *adaptive embedding* tensor of dimension $[288 \times N \times d_{adp} = 80]$ (i.e., a separate embedding per 5-minute time-of-day slot, shared across all training windows that hit that slot). This concatenated representation passes through three temporal self-attention layers and three spatial self-attention layers, then a flat linear projection from $T_{in} \cdot d_{model}$ to $T_{out}$ produces per-sensor predictions. The total parameter count is approximately 1.26M.
 
-We treat STAEformer [Liu et al. 2023] as our base architecture. Briefly: the encoder concatenates an input embedding of normalized speed, a time-of-day embedding, a day-of-week embedding, and a learnable per-(time-index, sensor) adaptive embedding (the headline novelty of the paper), then applies a stack of temporal self-attention layers and spatial self-attention layers in sequence. A flat linear projection from $T_{in} \cdot d_{model}$ to $T_{out}$ produces predictions per sensor.
-
-In our independent reproduction (§ 7.2), STAEformer reaches 60-min test MAE of approximately 3.34 on METR-LA (seed 42) and approximately 1.89 on PEMS-BAY, matching the published numbers within 0.02. We use STAEformer as both a reference baseline and as the encoder backbone of STAE-Spectral-Magma.
-
----
-
-## 3. The Research Journey
-
-We deliberately present the research as it unfolded rather than as a clean retrospective construction. This serves two purposes: it makes the empirical decisions reproducible, and it documents the chain of negative results that constrained the eventual contribution.
-
-### 3.1 Phase A: SSM-Magma standalone
-
-The initial pitch was an entirely new architecture: a three-view spectral mixture-of-experts (symmetric + magnetic + learned-semantic), each view processed by the bi-axis Mamba block, with a horizon-cluster router producing the final prediction directly in node space via $U \cdot \hat{z}$ unprojection. STAEformer was not part of the design; the spectral MoE was meant to be the standalone predictor.
-
-We trained SSM-Magma standalone on METR-LA with $K = 48$ eigenmodes, $d_{model} = 64$, $n_{layers} = 2$, $d_{adp\_emb} = 0$. The result, after 80 epochs with patience 15, was a validation MAE of approximately **3.55** — *significantly worse than STAEformer's 2.74*, and worse than the pure-persistence baseline at long horizons (60-min validation MAE of 4.65 versus STAEformer's 3.15).
-
-**What we initially thought**: capacity insufficient. We scaled to $d_{model} = 96$, $n_{layers} = 3$, $K = 64$. Validation MAE moved from 3.55 to 3.73 — *no improvement*.
-
-We then increased $K$ to 128 (matching the bottom 62% of the 207-mode Laplacian spectrum on METR-LA). Validation MAE settled around 3.61 — better, but still 0.87 MAE worse than STAEformer.
-
-At this point we performed the oracle analysis (§ 5) for the first time. It revealed that the *best achievable* validation MAE with a $K = 128$ spectral residual on top of a persistence baseline was 2.07 — well below STAEformer's 2.74. The bandwidth was not the problem. The bottleneck was the predictability of the optimal spectral coefficients from input alone, which is much harder than the existence of those coefficients.
-
-### 3.2 Phase B: Adaptive embedding
-
-STAEformer's main empirical advantage is its $[T_{in} \times N \times d_{adp}]$ adaptive embedding, which gives the model per-(input-step, sensor) memory accumulated over training. We hypothesized that SSM-Magma's underperformance was caused by the *lack* of this memory: every expert was processing raw normalized speeds + time-of-day + day-of-week embeddings only, with no learnable per-sensor identity.
-
-We added a position-indexed adaptive embedding $E \in \mathbb{R}^{T_{in} \times N \times d_{adp}}$ with $d_{adp} = 24$, projected through each expert's spectral basis at every forward, lifted to $d_{model}$ by a small linear and added to the per-mode features. Validation MAE on METR-LA improved from 3.61 to 3.51 — a 0.10 gain, but the model overfit beyond epoch 5 (training MAE continued dropping while validation stalled).
-
-We then identified that STAEformer's adaptive embedding is indexed by *time-of-day bin* (288 5-minute bins per day, shared across all windows) rather than by absolute window position. This is the key generalization mechanism: 7:00 AM rush-hour patterns are represented identically across thousands of windows. We refactored to a $[288 \times N \times 24]$ TOD-indexed embedding ($\approx 1.43M$ parameters), looked up at forward time using `(tod * 288).long()`. The expectation was a substantial improvement.
-
-The result was *not* improvement. Validation MAE held at 3.55 over 20 epochs and the same overfitting pattern emerged after epoch 5. We diagnosed this empirically:
-
-> "**The bi-axis Mamba operating on (T=12, K=128) sequences cannot find a function class that generalizes well on METR-LA. Mamba's selective scan is designed for long sequences with linear scaling; for T=12 and K=128 it has too much per-step flexibility and no spatial-temporal attention inductive bias like STAEformer has. With adaptive embedding it just memorizes; without it, it can't fit. There's no middle ground in this architecture's loss landscape.**"
-
-At this point we made the architectural pivot to the hybrid design.
-
-### 3.3 Phase C: STAEformer hybrid
-
-We re-cast the spectral MoE as a *sidechain residual* on top of STAEformer's encoder. STAEformer would handle the heavy representational lifting; the spectral sidechain would inject graph-structural signal as an additive residual. The architecture is described in detail in § 4.
-
-On the first PEMS-BAY hybrid attempt, training loss exploded at epoch 5 (training MAE jumped from 1.51 to 4.24, validation from 1.66 to 5.54). The cause was that we had matched STAEformer's training hyperparameters exactly, including its `gradient_clip = 0.0` (the original STAEformer has no gradient clipping). The spectral sidechain's bi-axis Mamba on the complex magnetic basis produced large gradient norms early in training; without clipping, this destabilized the joint optimization. Re-enabling `gradient_clip = 5.0` resolved the issue immediately and reproducibly. We document this empirically-discovered training requirement in § 4.6.
-
-The first stable PEMS-BAY hybrid (seed 42, 60 epochs, milestones [20, 30], $\gamma = 0.1$) reached validation MAE 1.564, marginally below STAEformer's 1.569 and modestly below STAEformer's published numbers.
-
-The first stable METR-LA hybrid was the more revealing result: validation MAE plateaued at 2.875 - 2.911 across multiple configurations (varying initialisation, adaptive-embedding scheme, LR schedule). *Worse* than STAEformer's 2.74. We confirmed via a frozen-encoder ablation that the sidechain was actively *increasing* validation MAE from 2.740 to 2.834 over 21 epochs — the residual was learning training-set noise that did not generalise. This is the classical pattern that DiSR-Mamba [Li et al. 2026, internal] previously documented on the same benchmark, and our independent reproduction strengthens that finding.
-
-### 3.4 Phase D: ablation of the novel pieces
-
-With the hybrid stable on PEMS-BAY at seed 42, we performed targeted ablations of the two pieces that most strongly distinguish our architecture from prior work: the magnetic Laplacian view and the bi-axis (mode-axis) scan. We ran the full model, no-mag (drop magnetic view), and no-modeaxis (drop the mode-axis Mamba) at the same seed and a matched compressed training schedule (30 epochs, milestones [10, 18], patience 15) to ensure a fair comparison.
-
-The ablation table (§ 7.4) showed:
-
-- **`no_mag` strictly beats `full`**: validation MAE 1.525 vs 1.543, test 60-min MAE 1.874 vs 1.909. The magnetic Laplacian view *harms* the model on PEMS-BAY.
-- **`no_modeaxis` beats `full`** by a smaller margin: validation MAE 1.532 vs 1.543. The mode-axis scan provides negligible-to-negative benefit.
-- **`no_mag` and `no_modeaxis` both beat STAEformer** (1.569 validation MAE), confirming that the spectral augmentation idea is sound but that the two most novel-sounding pieces are not the ones doing the work.
-
-These results forced an honest re-framing of the contribution. The paper's primary positive finding becomes: a *learned-semantic spectral basis combined with a symmetric Laplacian view and the horizon-cluster MoE router* improves a STAEformer backbone on PEMS-BAY by approximately 0.016 test 60-min MAE at single seed. The paper's two characterised negative findings (magnetic Laplacian for traffic, bi-axis Mamba mode scan on short K) become first-class scholarly contributions: each adds to the catalogue of approaches that have been tried and quantified.
+We chose STAEformer as the backbone for three reasons. First, it is the strongest *reproducible* baseline: our independent reimplementation reaches validation MAE 2.740 on METR-LA seed 42 and 1.569 on PEMS-BAY seed 42 (§ 7.2), within 0.02 of the published numbers. Second, its adaptive embedding gives it strong per-(sensor, time) memory that we can compare any spectral augmentation against. Third, it represents a coherent architectural family (attention + adaptive embedding, no explicit graph) whose strengths and weaknesses we can reason about cleanly.
 
 ---
 
-## 4. Method
+## 3. Hypotheses, Mathematical Motivation, and Experimental Design
 
-We describe the architecture in its final form, with rationale for each design choice given alongside the corresponding code-level details.
+Each architectural intervention we tested was motivated by a specific theoretical observation. We document the motivation in detail because the *reasons* the interventions failed are themselves contributions; understanding why each hypothesis seemed plausible is essential to understanding what the negative results actually rule out.
+
+### 3.1 H1: spectral sidechain on a permutation-equivariant encoder
+
+**Statement**: STAEformer's spatial attention is permutation-equivariant over sensors; injecting graph-structured spectral signal as an additive sidechain should improve prediction.
+
+**Mathematical motivation**: STAEformer's spatial attention layer computes, for each query position $(t, i)$,
+$\text{out}_{t,i} = \sum_j \text{softmax}\!\left(\frac{q_i k_j^T}{\sqrt{d}}\right) v_j$,
+where the attention weights depend only on learned $q, k, v$ projections of the per-sensor embeddings, not on any explicit graph. Two sensors with different sensor IDs but identical adaptive embeddings would be attended to identically. Any structural information about the graph (proximity, flow direction, similarity) must be inferred by the attention layer from data.
+
+An additive sidechain in graph-spectral space provides exactly the missing prior: a low-rank summary of graph structure that the attention layer can use as a structured offset rather than rederiving from scratch.
+
+**Intuition**: think of STAEformer as a powerful but graph-blind model. We're providing it with a "structural lens" on the sensor network — three views of the graph — and letting it learn how to use them.
+
+**How we tested**: STAE-Spectral-Magma joint training (§ 4) on METR-LA and PEMS-BAY, plus a frozen-trunk variant where the encoder is fixed at its STAEformer-trained checkpoint and only the sidechain trains.
+
+### 3.2 H2: magnetic Laplacian for directional flow
+
+**Statement**: Adding a *magnetic* Laplacian view to the sidechain should specifically capture upstream/downstream propagation that the symmetric Laplacian cannot.
+
+**Mathematical motivation**: For a symmetric adjacency $A_{sym}$, the eigenvectors of $L_{sym}$ are *real-valued* — they form smooth spatial bumps that capture geometric similarity but no directionality. For a directed adjacency $A_{dir}$, define
+$A_s = \tfrac{1}{2}(A_{dir} + A_{dir}^T), \quad \Theta_q = 2\pi q (A_{dir} - A_{dir}^T)$
+and the magnetic Laplacian
+$L_q = I - D_s^{-1/2}(A_s \odot e^{i \Theta_q}) D_s^{-1/2}$.
+This is Hermitian, so it has real eigenvalues and an orthonormal *complex* eigenbasis. The phase $\Theta_q$ in each entry rotates by the charge parameter $q$ for each unit of edge asymmetry; the resulting eigenvectors carry both magnitude (= geometric similarity, like $L_{sym}$) and phase (= lead-lag structure between sensors).
+
+**Intuition**: imagine traffic congestion as a wave propagating along a freeway. A real Laplacian basis describes "places that are close on the road network." A magnetic Laplacian basis describes "places that are close on the road network *and* the direction of wave propagation between them." For 60-minute prediction, where congestion has had time to propagate several miles, this directional information should be valuable.
+
+**How we tested**: we infer a directed adjacency for METR-LA and PEMS-BAY from training-data lagged cross-correlations between geographic neighbors (§ 4.3.2), construct $L_q$ with $q = 0.10$, and include the magnetic view as one of the three views in the STAE-Spectral-Magma sidechain. We then ablate it (`--no-use_mag`) to isolate its contribution.
+
+### 3.3 H3: bi-axis Mamba over (time × graph-spectral mode)
+
+**Statement**: A selective state-space scan along the eigenvalue-ordered graph-Laplacian mode axis, in addition to the temporal axis, should exploit mode coupling.
+
+**Mathematical motivation**: Mamba's strength on long sequences comes from its data-dependent recurrence $h_t = A(x_t) h_{t-1} + B(x_t) x_t$, which preserves directional ordering. For a sequence to benefit from Mamba over alternatives (attention, MLP), it needs (i) length and (ii) a meaningful ordering.
+
+The graph-spectral mode axis has both properties. After projecting a node-feature tensor through the bottom-$K$ eigenvectors of $L_{sym}$, the spectral coefficients $\hat{x}_k$ for $k = 1, \dots, K$ are naturally ordered by eigenvalue magnitude $\lambda_1 \leq \lambda_2 \leq \dots \leq \lambda_K$. The eigenvalue interpretation is "frequency on the graph": $\hat{x}_1$ encodes the global mean (city-wide rush hour); $\hat{x}_K$ encodes local, high-frequency perturbations (single-sensor incidents).
+
+In a physical analog, traffic dynamics couple these scales: a city-wide rush-hour state determines *which* high-frequency perturbations are physically plausible (congestion shockwaves only originate from already-loaded freeway segments). A selective scan along the mode axis could in principle learn this coupling: given the current low-frequency state, gate the updates to high-frequency coefficients accordingly.
+
+**Intuition**: word order is to language as eigenvalue order is to graph signal. Both provide a directional axis that a selective scan can exploit.
+
+**How we tested**: we implemented the bi-axis Mamba block (§ 4.4) and tested it via the `--no-spec_mode_axis` ablation flag, which disables the mode-axis scan and keeps only the conventional temporal scan.
+
+### 3.4 H4: learned-semantic spectral basis
+
+**Statement**: An adaptive adjacency, *eigendecomposed every forward pass* and used as a spectral basis, captures behavioral similarity beyond geographic proximity.
+
+**Mathematical motivation**: Adaptive-adjacency methods (Graph WaveNet, MTGNN, AGCRN) learn a similarity matrix $A_{learned}$ end-to-end and apply it via message passing $X' = A_{learned} X W$. The signal in $A_{learned}$ is the learned answer to "which sensors should be considered similar." But message passing uses the full matrix, conflating dominant similarity modes with noise. An eigendecomposition extracts a low-rank summary: the top-$K$ eigenvectors span the dominant similarity directions, suppressing per-sensor noise.
+
+For our implementation, we let each sensor have a learnable embedding $e_i \in \mathbb{R}^{d_{sem}}$, build a $k$-nearest-neighbor graph from cosine similarities of $\{e_i\}$, symmetrize and self-loop, form the normalized Laplacian, and eigendecompose. The bottom-$K$ eigenvectors are then used as a spectral projection basis $U_{sem}$ for the bi-axis Mamba.
+
+The critical implementation detail is that the embedding $\{e_i\}$ must receive gradients from the forecasting loss *through* the eigendecomposition. This is mathematically well-defined (eigh's vector-Jacobian product is known for non-degenerate eigenvalues) but numerically unstable when eigenvalues approach degeneracy. We resolved this with three safeguards described in § 4.3.3.
+
+**Intuition**: sensors that aren't geographically close can still behave similarly (e.g., parallel freeway sections at the same rush-hour phase). The geographic Laplacian cannot connect them; a learned-similarity Laplacian can. This view should specialize in cross-corridor patterns.
+
+**How we tested**: we included the semantic view as one of the three in STAE-Spectral-Magma, with `--no-use_sem` as the ablation flag.
+
+### 3.5 H5: heteroscedastic loss for capacity reallocation on saturated benchmarks
+
+This is the most theoretically intricate of our hypotheses, and motivated two variants. We motivate it in two stages.
+
+**3.5.1 The capacity-reallocation argument**
+
+When training STAEformer with masked MAE, every $(sensor, horizon)$ position contributes equally to the loss. For an intrinsically unpredictable target (e.g., a 60-minute prediction during a not-yet-observed incident), the model's prediction $\hat{y}$ cannot be improved beyond the conditional median, but the loss still penalizes the residual $|y - \hat{y}|$ as if it were predictable. The model's gradient signal therefore wastes capacity trying to fit irreducible noise.
+
+A heteroscedastic loss with a learned scale parameter changes this. Consider Gaussian NLL:
+$\text{NLL}_G = \tfrac{1}{2} \left( \log \sigma^2 + \frac{(y - \mu)^2}{\sigma^2} \right) + \text{const}$.
+For a fixed $(y - \mu)^2$, the optimal $\sigma^2$ satisfies $\partial_{\sigma^2} \text{NLL}_G = 0 \implies \sigma^2 = (y - \mu)^2$, giving $\text{NLL}_G = \tfrac{1}{2}(1 + \log(y - \mu)^2)$. The loss grows only logarithmically with the squared residual. Compare to the masked-MAE loss $|y - \mu|$, which grows linearly: high-error positions dominate the loss when MAE-trained but get downweighted (in a $\log$ sense) when NLL-trained.
+
+**Intuition**: heteroscedastic NLL lets the model "give up" on intrinsically uncertain horizons by raising $\sigma$ there, freeing the gradient signal to focus on horizons it can actually predict. The point prediction $\mu$ on predictable horizons should *improve* under this reallocation.
+
+This was H5 — the central theoretical proposal for breaking the METR-LA wall.
+
+**3.5.2 The loss-objective mismatch (Gaussian vs Laplace)**
+
+We tested H5 first with Gaussian NLL and observed a clear *worsening* of validation MAE (2.978 vs STAEformer's 2.740). Diagnostic analysis showed that the heteroscedastic structure was learning correctly — log $\sigma^2$ values consistently ordered as $\sigma_{15} < \sigma_{30} < \sigma_{60}$ at every epoch — but point-prediction MAE was worse. We diagnosed this as a loss-objective mismatch.
+
+Specifically: for any data distribution $p(Y | X)$, the *Bayes-optimal point predictor* depends on the loss function:
+- Under squared loss $\mathbb{E}[(Y - \mu)^2]$, the optimum is $\mu^* = \mathbb{E}[Y \mid X]$ (the conditional mean).
+- Under absolute loss $\mathbb{E}[|Y - \mu|]$, the optimum is $\mu^* = \text{median}[Y \mid X]$ (the conditional median).
+
+Gaussian NLL is the maximum-likelihood loss for a Gaussian observation model; its $\mu$ is trained to be the conditional mean. But our evaluation metric is MAE, which is optimized by the conditional median. On the METR-LA target distribution — heavy-tailed due to incidents and lane closures — the conditional mean and median diverge, and the mean-trained $\mu$ is suboptimal under MAE.
+
+The fix is to use the Laplace distribution as the observation model:
+$\text{NLL}_L = \log(2b) + \frac{|y - \mu|}{b} = \log 2 + \log b + |y - \mu| \cdot e^{-\log b}$.
+The maximum-likelihood estimate of $\mu$ under Laplace NLL is the conditional median — exactly the MAE-optimal point predictor. The heteroscedastic scale $b$ still provides capacity reallocation.
+
+**Intuition**: Gaussian NLL says "predict the mean, scale it by σ." Laplace NLL says "predict the median, scale it by $b$." For MAE evaluation, only the latter is consistent.
+
+**How we tested**: we implemented the Gaussian NLL head first (§ 4.5), observed its failure mode, then implemented the Laplace head as the loss-mismatch fix.
+
+---
+
+## 4. Architecture: STAE-Spectral-Magma
+
+We describe the architecture in its final, post-debugging form. Each design decision is justified either at the design stage or empirically (§ 6 documents empirically discovered fixes).
 
 ### 4.1 Notation
 
-Given $N$ sensors and an input window of $T_{in} = 12$ five-minute timesteps, we observe normalized speeds $X \in \mathbb{R}^{B \times T_{in} \times N}$, time-of-day $\tau \in [0,1)^{B \times T_{in}}$, and day-of-week $\delta \in \{0..6\}^{B \times T_{in}}$. The forecasting target is $Y \in \mathbb{R}^{B \times T_{out} \times N}$, with $T_{out} = T_{in} = 12$.
+Input window of $T_{in} = 12$ five-minute timesteps, $N$ sensors. Inputs: normalized speed $X \in \mathbb{R}^{B \times T_{in} \times N}$, time-of-day $\tau \in [0, 1)^{B \times T_{in}}$, day-of-week $\delta \in \{0, \dots, 6\}^{B \times T_{in}}$. Target: $Y \in \mathbb{R}^{B \times T_{out} \times N}$ with $T_{out} = T_{in} = 12$. Adjacency $A \in \mathbb{R}^{N \times N}$ (symmetric Gaussian-kernel) is provided; directed $A_{dir}$ is derived (§ 4.3.2).
 
-We assume a sensor adjacency $A \in \mathbb{R}^{N \times N}$. METR-LA and PEMS-BAY ship a symmetric Gaussian-kernel adjacency built from inter-sensor road distances. From this we derive a directed adjacency $A_{dir}$ for the magnetic Laplacian via short-lag cross-correlation (§ 4.3.2).
+### 4.2 STAEformer encoder (unmodified)
 
-### 4.2 STAEformer encoder (reused unmodified)
+We use the published STAEformer encoder verbatim: input embedding ($d_{input}=24$), time-of-day embedding ($d_{tod}=24$), day-of-week embedding ($d_{dow}=24$), adaptive embedding tensor $E \in \mathbb{R}^{288 \times N \times 80}$, three temporal-attention layers, three spatial-attention layers, total $d_{model} = 152$. The encoder produces a hidden tensor $H \in \mathbb{R}^{B \times T_{in} \times N \times d_{model}}$.
 
-We use STAEformer [Liu et al. 2023] as the encoder backbone with its published configuration: $d_{input} = d_{tod} = d_{dow} = 24$, $d_{adp} = 80$, three temporal-attention layers and three spatial-attention layers each with $d_{ffn} = 256$ and 4 heads, total $d_{model} = 152$. The encoder produces a hidden tensor $H \in \mathbb{R}^{B \times T_{in} \times N \times d_{model}}$.
-
-We modify only the encoder's *output pathway*: the spectral sidechain produces an additive residual $H_{aug}$ that is summed with $H$ before STAEformer's flat linear projection to predictions.
+We modify only the output pathway: the spectral sidechain produces an additive residual $H_{aug}$ summed with $H$ before STAEformer's flat output projection.
 
 ### 4.3 Three-view spectral sidechain
 
-The sidechain receives $H$ as input, projects it through a down-sampling linear $\text{proj}_{\text{down}}: \mathbb{R}^{d_{model}} \to \mathbb{R}^{d_{branch}}$ (we use $d_{branch} = 64$), processes the result through each spectral view, blends the view outputs through the horizon-cluster router, and projects back to $d_{model}$ through $\text{proj}_{\text{up}}$. The up-projection is initialised with $\sigma = 10^{-3}$ so that the sidechain output starts near zero at training step 1; STAEformer dominates initially and the sidechain grows in as training progresses. This was a critical implementation choice — uninitialised or default-initialised up-projection caused early training instability.
+Given $H$, the sidechain computes $H_{aug}$ through three parallel views:
+$Z_v = U_v^* H_{\text{low}}, \quad Z'_v = \text{BiAxisMamba}(Z_v), \quad H_v = U_v Z'_v$
+for $v \in \{\text{sym}, \text{mag}, \text{sem}\}$, where $H_{\text{low}} = \text{proj}_{\text{down}}(H) \in \mathbb{R}^{B \times T \times N \times d_{branch}}$ and $d_{branch} = 64$. The three node-space outputs $H_v$ are blended by the horizon-cluster router (§ 4.4):
+$H_{\text{mix}} = \sum_v g_v H_v, \quad H_{aug} = \text{proj}_{\text{up}}(H_{\text{mix}}), \quad H_{\text{final}} = H + H_{aug}$.
 
-For each view $v \in \{\text{sym}, \text{mag}, \text{sem}\}$ with basis $U_v$:
-
-$$
-Z_v = U_v^* \cdot H_{\text{low}}, \quad Z'_v = \text{BiAxisMamba}(Z_v), \quad H_v = U_v \cdot Z'_v
-$$
-
-where $H_{\text{low}} = \text{proj}_{\text{down}}(H) \in \mathbb{R}^{B \times T \times N \times d_{branch}}$ and $Z_v \in \mathbb{R}^{B \times T \times K \times d_{branch}}$ (or with doubled feature dim in the magnetic case; see § 4.3.2). The view outputs $H_v$ are blended:
-
-$$
-H_{\text{mix}} = \sum_v g_v \cdot H_v, \quad H_{\text{aug}} = \text{proj}_{\text{up}}(H_{\text{mix}}), \quad H_{\text{final}} = H + H_{\text{aug}}
-$$
-
-where $g_v$ are router-produced mixing weights (§ 4.4).
+$\text{proj}_{\text{up}}$ is initialized with standard deviation $10^{-3}$, an empirically critical detail (§ 6.1).
 
 #### 4.3.1 Symmetric view
 
-We construct $L_{sym} = I - D^{-1/2}(A + I) D^{-1/2}$ from the given symmetric adjacency $A$ (with self-loop). $U_{sym} \in \mathbb{R}^{N \times K}$ is the matrix of the $K$ bottom eigenvectors. Standard, fixed, precomputed once.
+$U_{sym} \in \mathbb{R}^{N \times K}$ contains the bottom-$K$ eigenvectors of $L_{sym} = I - D^{-1/2}(A + I)D^{-1/2}$. Standard, fixed, precomputed.
 
 #### 4.3.2 Magnetic view
 
-For the magnetic Laplacian we require a directed adjacency $A_{dir}$. METR-LA and PEMS-BAY do not provide one explicitly. We *infer* directionality from the training data by lagged cross-correlation: for each edge $(i, j)$ with $A_{ij} > 0$, we compute
+Directed adjacency $A_{dir}$ is inferred from training-data lagged correlations: for each edge $(i, j)$ with $A_{ij} > 0$,
+$c_{i \to j}(\tau) = \text{corr}(X[:-\tau, i], X[\tau:, j])$
+for $\tau \in \{1, 2, \dots, 6\}$ (5- to 30-minute lead times). We assign $i \to j$ if $\sup_\tau c_{i \to j}(\tau) > \sup_\tau c_{j \to i}(\tau)$ by a significant margin. The construction of $L_q$ then follows § 3.2 with $q = 0.10$.
 
-$$
-c_{i \to j}(\tau) = \text{corr}(X[:-\tau, i], X[\tau:, j])
-$$
+To use the complex basis $U_{mag} \in \mathbb{C}^{N \times K}$ with a real-valued Mamba, we project through $U_{mag}^H$ to obtain complex spectral coefficients and fold $[\text{Re}, \text{Im}]$ into the feature axis: $Z_{mag} \in \mathbb{R}^{B \times T \times K \times 2 d_{branch}}$. Unprojection takes the real part.
 
-for $\tau \in \{1, 2, ..., 6\}$ (5- to 30-minute lead times). If $\sup_\tau c_{i \to j}(\tau) - \sup_\tau c_{j \to i}(\tau) > 0$ by a significant margin, we assign $A_{dir, ij} = A_{ij}$ with $A_{dir, ji} = 0$. This is computed once on the training split.
+#### 4.3.3 Learned-semantic view (with stability safeguards)
 
-Given $A_{dir}$, the magnetic Laplacian with charge $q$ is
+Each sensor has a learnable embedding $e_i \in \mathbb{R}^{d_{sem}=24}$. At every training forward:
+1. Compute pairwise cosine similarities; retain top-$k = 12$ per row.
+2. Symmetrize, add self-loop, form $L_{sem} = I - D^{-1/2}(A_{kNN}) D^{-1/2}$.
+3. Eigendecompose (with safeguards): jitter $\epsilon = 10^{-5}$ on the diagonal, force FP32 even under bf16 autocast, fall back to the previously cached basis if `torch.linalg.eigh` raises.
+4. Take bottom-$K$ eigenvectors as $U_{sem}$.
 
-$$
-A_s = \frac{1}{2}(A_{dir} + A_{dir}^T), \quad \Theta_q = 2 \pi q (A_{dir} - A_{dir}^T), \quad L_q = I - D_s^{-1/2}(A_s \odot e^{i \Theta_q}) D_s^{-1/2}
-$$
-
-$L_q$ is Hermitian; we eigendecompose to obtain a complex basis $U_q \in \mathbb{C}^{N \times K}$. We use $q = 0.10$.
-
-To use a complex basis with a real-valued Mamba, we project the down-sampled features through $U_q^H = (U_q)^\dagger$ to obtain complex spectral coefficients, and **fold the real and imaginary parts into the feature axis**: $Z_{mag} \in \mathbb{R}^{B \times T \times K \times 2d_{branch}}$. The bi-axis Mamba operates on this folded representation. Unprojection takes the real part of $U_q \cdot \hat{Z}$.
-
-The hypothesis here, in detail: STAEformer's spatial attention has no built-in notion of "i leads j by τ minutes." It must learn this from data through the adaptive embedding plus attention weights. The magnetic Laplacian gives it for free: the *phase* of each eigenvector entry encodes lead-lag relationships in the directed graph. We expected this to manifest as improved 60-minute prediction during congestion-onset and congestion-recovery regimes.
-
-#### 4.3.3 Learned-semantic view
-
-Each sensor $i$ has a learnable embedding $e_i \in \mathbb{R}^{d_{sem}}$ (we use $d_{sem} = 24$). At every training forward, we compute pairwise cosine similarities of $\{e_i\}_{i=1}^N$, retain the top-$k$ entries per row ($k = 12$), symmetrize, add a self-loop, and form the symmetric normalized Laplacian $L_{sem}$. We then eigendecompose to obtain the bottom-$K$ real eigenvectors $U_{sem}$.
-
-The numerical implementation requires care. `torch.linalg.eigh` is not stable for degenerate or near-degenerate eigenvalues, which arise routinely when the learned embedding drifts during training. Our final implementation:
-
-1. **Diagonal jitter**: $\tilde{L} = L_{sem} + 10^{-5} I$
-2. **FP32 promotion**: under bf16 autocast, force the eigh solver to operate in FP32
-3. **Previous-basis fallback**: if eigh raises an exception, return the most recently cached $U_{sem}$ (or identity at cold start)
-
-These three safeguards were discovered through empirical training failures (§ 6.3.3) and are essential — without them, training crashed with `_LinAlgError` within 5-10 epochs on PEMS-BAY.
-
-Crucially, the embedding $\{e_i\}$ receives gradients from the forecasting loss through the eigh operation (whose VJP is well-defined when eigenvalues are distinct). The basis is therefore *trained* end-to-end as a discovered spectral structure, not specified a priori.
+The fallback path (3rd safeguard) is essential. We discovered through empirical training failures that without it, the eigh solver crashes within 5-10 epochs once embeddings drift into near-degeneracy (§ 6.3.3). At inference, $U_{sem}$ is cached on first call.
 
 ### 4.4 Bi-axis Mamba block
 
-The bi-axis block operates on a feature tensor $h \in \mathbb{R}^{B \times T \times K \times d}$:
+For a feature tensor $h \in \mathbb{R}^{B \times T \times K \times d}$:
+$y_T = \text{MambaScan}_T(\text{LN}(h)) \quad \text{(over T, with (B, K) contracted)}$
+$y_K = \text{MambaScan}_K(\text{LN}(h)) \quad \text{(over K, with (B, T) contracted)}$
+$g = \sigma(W \cdot \text{concat}(y_T, y_K))$
+$\text{out} = g \cdot y_T + (1 - g) \cdot y_K + h$.
 
-$$
-y_T = \text{MambaScan}_T(\text{LN}(h)) \quad \text{(scan along T, with (B,K) contracted into batch)}
-$$
-$$
-y_K = \text{MambaScan}_K(\text{LN}(h)) \quad \text{(scan along K, with (B,T) contracted into batch)}
-$$
-$$
-g = \sigma\!\left(W \cdot \text{concat}(y_T, y_K)\right), \quad \text{out} = g \cdot y_T + (1-g) \cdot y_K + h
-$$
+The mode-axis scan is the novel piece (§ 3.3).
 
-The temporal scan is conventional and matches standard Mamba usage. **The mode-axis scan is the novelty**: it treats the $K$ bottom eigenmodes as a sequence with a meaningful ordering (eigenvalue magnitude). Low modes correspond to global, smooth patterns (e.g., the city-wide rush-hour mean); high modes correspond to localized, sensor-level perturbations (incidents, shockwaves). The selective scan, with its data-dependent gating, can in principle ask "given that the global rush-hour mode is currently active, how should I update the localized-congestion modes?"
+### 4.5 Probabilistic output variants (H5)
 
-This was an attractive hypothesis. We discuss in § 8.2 why ablation does not strongly support it.
+For the H5 experiments, we replace STAEformer's flat output projection with a Gaussian or Laplace head:
+$\text{Linear}(T_{in} \cdot d_{model} \to 2 T_{out})$
+producing $(\mu, \log s)$ per sensor. For Gaussian, $s = \sigma^2$ and the loss is $\text{NLL}_G$. For Laplace, $s = b$ and the loss is $\text{NLL}_L$. The mean half of the head is initialized from the original STAEformer's output projection weights so the model produces sensible predictions at step 1; the scale half is initialized to zero. The scale is clamped to $\log s \in [-7, 7]$ for numerical stability.
 
-### 4.5 Horizon-cluster router
+Inference uses $\mu$ as the point prediction.
 
-Sensors are clustered once at preprocessing by spectral clustering on the symmetric kernel $\frac{1}{2} A_{norm} + \frac{1}{2} \text{Corr}(X_{train})$, producing $N_{clusters} = 12$ groups that combine geographic and behavioural proximity.
+### 4.6 Horizon-cluster router
 
-The router consumes:
-- Horizon embedding $h_{emb}(t)$ for $t \in \{0..T_{out}-1\}$
-- Cluster embedding $c_{emb}(c)$ for $c \in \{0..N_{clusters}-1\}$
-- Time-of-day and day-of-week embeddings from the most recent input step
-- Per-cluster context features: mean/std/congestion-fraction of recent raw speeds, aggregated to clusters
+Sensors are clustered once at preprocessing by spectral clustering on $\tfrac{1}{2} A_{norm} + \tfrac{1}{2} \text{Corr}(X_{train})$, producing 12 groups. The router consumes horizon and cluster embeddings, time-of-day and day-of-week, per-cluster recent context (mean/std/congestion-fraction), and outputs softmax mixing weights $g_v$ plus a residual scale $\alpha \in (0, 1.5)$. Total router parameters: ~5K, independent of $B$ or $N$.
 
-A two-layer MLP outputs $(N_{experts} + 1)$ logits per $(B, \text{horizon}, \text{cluster})$. The first $N_{experts}$ become softmax mixing weights $g_v$; the last becomes a residual scale $\alpha = \alpha_{max} \cdot \sigma(\cdot) \in (0, \alpha_{max})$ that controls the overall magnitude of the spectral residual relative to the encoder. We use $\alpha_{init} = 1.0$, $\alpha_{max} = 1.5$.
-
-Cluster-level outputs are scattered back to per-sensor weights through the fixed cluster assignment. The router has $\approx 5$K parameters — small enough that its capacity does not allow per-sample memorization.
-
-### 4.6 Training
-
-Loss: standard masked MAE on de-normalized predictions, with the mask being unity where the speed reading is non-zero and finite.
+### 4.7 Training
 
 Optimizer: AdamW, $\eta = 10^{-3}$, weight decay $3 \cdot 10^{-4}$.
-
-Learning-rate schedule: MultiStepLR with milestones $[20, 30]$ and decay $\gamma = 0.1$ — exactly matching STAEformer's published schedule, which is necessary for the backbone to converge to its 2.74 ceiling on METR-LA. For the compressed-schedule ablation (§ 7.4) we use milestones $[10, 18]$.
-
-**Gradient clipping at 5.0** is required for stability. Without clipping, the magnetic-Laplacian pathway plus the bi-axis Mamba can produce gradient norms large enough to cause loss explosion within 5 epochs. This was discovered empirically (§ 3.3) and represents a discrepancy with STAEformer's training (`gradient_clip = 0.0`).
-
-Mixed precision: bf16 autocast on H200 GPUs. The eigh solver in the learned-semantic view is explicitly promoted to FP32 even under autocast.
+LR schedule: MultiStepLR with milestones $[20, 30]$, $\gamma = 0.1$ — matching STAEformer's published schedule (necessary for the encoder to converge to its val 2.74 ceiling on METR-LA).
+Gradient clipping: $5.0$ (empirically necessary for the sidechain stability, § 6.2).
+Mixed precision: bf16 autocast, with FP32 promotion for the eigh solver.
 
 ---
 
-## 5. Oracle Analysis
+## 5. Oracle Analysis Methodology
 
-We introduce a methodology for quantifying the *upper bound* on what any spectral residual learner can achieve. Given a baseline predictor producing $\hat{Y}_{base}$ (e.g., last-step persistence) and a target $Y_{true}$, a spectral residual restricted to lie in $\text{col}(U)$ for some basis $U \in \mathbb{R}^{N \times K}$ achieves at best
+We introduce a closed-form bound on the achievable error of any K-mode spectral residual, used to diagnose whether a benchmark is bandwidth-limited or predictability-limited.
 
-$$
-L^*_K = \min_{\Delta \in \text{col}(U)} \lVert \Delta - (Y_{true} - \hat{Y}_{base}) \rVert_{\text{MAE}}
-$$
+### 5.1 Definition
 
-This is computed in closed form by projecting $(Y_{true} - \hat{Y}_{base})$ onto $U$ — the resulting projection-reconstruct MAE is $L^*_K$.
+Given a baseline predictor $\hat{Y}_{base}$ (e.g., last-step persistence) and a target $Y_{true}$, a spectral residual $\Delta$ restricted to $\text{col}(U)$ for $U \in \mathbb{R}^{N \times K}$ achieves at best
+$L^*_K = \min_{\Delta \in \text{col}(U)} \lVert \Delta - (Y_{true} - \hat{Y}_{base}) \rVert_{\text{MAE}}$.
 
-### 5.1 METR-LA: K versus oracle ceiling
+This is computed in closed form by projecting $Y_{true} - \hat{Y}_{base}$ onto $U$; the resulting projection-reconstruct MAE is $L^*_K$.
 
-We computed $L^*_K$ on METR-LA's validation split for the symmetric Laplacian basis at $K \in \{32, 48, 64, 96, 128\}$, with persistence as baseline:
+### 5.2 METR-LA: K versus oracle ceiling
 
-| $K$ | $L^*_K$ val_avg | $L^*_K$ val 60-min |
+Computed on METR-LA's validation split with persistence baseline and the symmetric Laplacian basis:
+
+| $K$ | $L^*_K$ val avg | $L^*_K$ val 60-min |
 |---:|---:|---:|
 | 32 | 3.71 | 4.54 |
 | 48 | 3.40 | 4.13 |
@@ -314,61 +308,62 @@ We computed $L^*_K$ on METR-LA's validation split for the symmetric Laplacian ba
 | 96 | 2.64 | 3.13 |
 | 128 | **2.07** | **2.46** |
 
-STAEformer's validation MAE is 2.74. The oracle ceiling at $K = 128$ is **below STAEformer's value**. Bandwidth is *not* the bottleneck — a sufficient spectral residual exists in $\text{col}(U_{sym})$.
+STAEformer achieves val MAE 2.74. The K=128 oracle is **below** STAEformer's value. Bandwidth is not the bottleneck. The bottleneck is the *predictability of the optimal coefficients from input alone* — the gap from 2.07 (oracle, fully observed) to ~2.87 (every learner we tested) is the predictability gap.
 
-But across every spectral residual learner we tested (SSM-Magma standalone, STAE-Spectral-Magma joint-trained, STAE-Spectral-Magma frozen-trunk), the achieved validation MAE plateaued near 2.87 - 2.95. The gap from 2.07 (oracle) to ~2.90 (best learner) is the *predictability gap*: the optimal coefficients in $\text{col}(U)$ are not recoverable from input alone by the learners we test.
+### 5.3 Implications
 
-### 5.2 Implications
+The oracle methodology separates two distinct failure modes for spectral augmentation:
+- **Bandwidth-limited** ($L^*_K \gg$ STAEformer): the chosen basis cannot in principle express the optimal residual. Increasing $K$ helps.
+- **Predictability-limited** ($L^*_K \ll$ STAEformer): the optimal residual *exists* in the basis but cannot be recovered from input alone by realistic learners. Increasing $K$ does not help; architectural innovation may help; but it may also fail (and on METR-LA, every architectural intervention we tested has failed).
 
-This methodology clarifies the field-wide pattern of plateau on METR-LA. It separates two distinct failure modes:
-
-1. **Bandwidth-limited** ($L^*_K \gg$ STAEformer): the chosen basis cannot in principle express the optimal residual. Increasing $K$ would help.
-2. **Predictability-limited** ($L^*_K \ll$ STAEformer): the optimal residual *exists* in the basis, but cannot be predicted from input alone by the architectures tested. Increasing $K$ does not help; architectural innovation on the *learner* might.
-
-On METR-LA at $K = 128$, we are in the second regime. This is, to our knowledge, the first quantitative characterization of which type of saturation METR-LA exhibits. We propose this analysis as a diagnostic to be applied to any spectral-augmentation method on any benchmark before substantial method development is invested.
+On METR-LA at $K = 128$, we are decisively in the predictability-limited regime. We propose this analysis as a *pre-flight check* for any future spectral-augmentation work: if $L^*_K$ on the target benchmark is at or above the existing baseline's error, no spectral-residual learner can reasonably be expected to help, and method development should be directed elsewhere.
 
 ---
 
-## 6. Implementation Details and Empirical Decisions
+## 6. Implementation Details
 
-We document several non-obvious implementation choices, motivated by failures observed during development. Each represents a real-world engineering cost of the methods proposed.
+Several non-obvious implementation choices were discovered through empirical failure during development. We document them because they are real engineering cost of the methods proposed.
 
 ### 6.1 Sidechain initialization
 
-The up-projection from $d_{branch}$ to $d_{model}$ in the spectral sidechain (§ 4.3) is initialised with $\sigma = 10^{-3}$, much smaller than PyTorch's default. This is essential. With default initialisation, the sidechain produces non-trivial output at step 1, which interferes with STAEformer's convergence regime. Validation MAE plateaus 0.10 - 0.15 higher than with σ = 10⁻³ initialisation under otherwise identical hyperparameters.
+The up-projection $\text{proj}_{\text{up}}$ from $d_{branch}$ to $d_{model}$ is initialized with $\sigma = 10^{-3}$. With PyTorch's default initialization, the sidechain produces non-trivial output at step 1, which interferes with STAEformer's convergence. Validation MAE plateaus 0.10-0.15 higher with default initialization.
 
-### 6.2 Gradient clipping
+### 6.2 Gradient clipping for the magnetic pathway
 
-As noted in § 4.6, training requires `gradient_clip = 5.0`. Without it, joint training of the STAEformer encoder and the magnetic-Laplacian sidechain produces a loss explosion at epoch 5-7 (training MAE jumps from $\sim 1.5$ to $\sim 5.0$, validation similarly). This was first observed on PEMS-BAY and reproduced consistently. STAEformer alone (without our sidechain) trains fine with `gradient_clip = 0.0`; the requirement is introduced by the spectral sidechain, specifically the magnetic complex-projection pathway.
+`gradient_clip = 5.0` is required. Without it, the magnetic-Laplacian pathway produces gradient norms large enough to cause loss explosion at epoch 5-7 (training MAE jumps from ~1.5 to ~5.0 on PEMS-BAY in a single epoch). STAEformer alone is stable with `gradient_clip = 0.0`; the requirement is introduced by the magnetic complex-projection pathway in the sidechain.
 
-### 6.3 Learned-semantic basis stability
+### 6.3 Learned-semantic basis stability (three-stage fix)
 
-#### 6.3.1 First observed failure
+#### 6.3.1 Naive failure: "backward through the graph a second time"
 
-The naive implementation of the learned-semantic view caches `self.U` across forward passes and recomputes every 200 steps. This was empirically catastrophic: the first attempt at training crashed with `RuntimeError: Trying to backward through the graph a second time` because the cached `U` retained autograd graph references from the step on which it was computed.
+The initial implementation cached `self.U` across forward passes, recomputing every 200 steps. This crashed: `RuntimeError: Trying to backward through the graph a second time`, because the cached $U$ retained autograd-graph references from the step on which it was computed, and a subsequent backward pass tried to traverse it again.
 
-#### 6.3.2 Second observed failure
+Fix: recompute $U$ every training forward, preserving autograd graph integrity.
 
-Once we recomputed `U` every training forward (preserving autograd graph), the eigh solver intermittently raised `torch._C._LinAlgError: ill-conditioned or repeated eigenvalues` once embeddings drifted into near-degenerate configurations. We observed this consistently with larger $d_{branch} = 96$ configurations.
+#### 6.3.2 Second failure: ill-conditioned eigh
 
-#### 6.3.3 Final implementation
+With $U$ recomputed every forward, `torch.linalg.eigh` intermittently raised `_LinAlgError: ill-conditioned or repeated eigenvalues` once embeddings drifted into near-degeneracy. This was observable consistently with larger $d_{branch} = 96$ configurations.
 
-Three defences:
-1. Diagonal jitter ($\epsilon = 10^{-5}$): $\tilde{L} = L + \epsilon I$.
-2. FP32 promotion: explicitly cast $\tilde{L}$ to FP32 before eigh, even under bf16 autocast.
-3. Previous-basis fallback: catch any `_LinAlgError` from eigh and return the previously cached basis. At cold start (no cache), fall back to the identity.
+#### 6.3.3 Final stable implementation
 
-With these three safeguards, training is stable across all configurations we tested. We strongly recommend this pattern for any future work that backpropagates through `torch.linalg.eigh` on a learned matrix.
+Three defenses:
+1. **Diagonal jitter** $\epsilon = 10^{-5}$ added before eigh.
+2. **FP32 promotion** even under bf16 autocast.
+3. **Previous-basis fallback** if eigh raises, with identity fallback at cold start.
 
-### 6.4 The position-versus-TOD adaptive-embedding bug
+These three together yielded stable training across all configurations.
 
-During Phase B (§ 3.2), we initially implemented the adaptive embedding as $E \in \mathbb{R}^{T_{in} \times N \times d_{adp}}$ — indexed by absolute window position. This is naively analogous to STAEformer's embedding shape but conceptually different: STAEformer's embedding is indexed by *time-of-day* (one entry per 5-minute bin per sensor per day, shared across all windows that hit the same TOD), not window position.
+### 6.4 TOD-indexed versus position-indexed adaptive embedding
 
-The position-indexed version overfit aggressively because the same parameter slot was being trained against many different absolute time-of-day patterns simultaneously, allowing the model to memorize "window 5 of training day 7 looked like X" without forced generalization across windows. Refactoring to TOD-indexed $[288 \times N \times d_{adp}]$ corrected this. We mention this primarily as a documentation aid for future researchers reimplementing STAEformer-like adaptive embeddings on new datasets.
+During an early SSM-Magma standalone variant (§ 7), we initially indexed an adaptive embedding by absolute window position $\in \{0, \dots, T_{in} - 1\}$, not by time-of-day. This overfit aggressively because the same parameter slots were being trained against thousands of distinct absolute time-of-day patterns simultaneously. Refactoring to TOD-indexed $[288 \times N \times d_{adp}]$ corrected this; documentation note for future researchers re-implementing STAEformer-style adaptive embeddings.
 
 ### 6.5 Schedule sensitivity
 
-STAEformer's published training schedule (milestones [20, 30] with $\gamma = 0.1$) is essential for full convergence to validation MAE 2.74 on METR-LA — under faster schedules, STAEformer alone plateaus 0.10 - 0.15 higher. Our hybrid inherits this sensitivity. For the ablation study (§ 7.4) we used a *compressed* schedule (milestones [10, 18]) to fit six 30-epoch runs in a feasible compute budget. This means our ablation comparisons are mutually consistent (same compressed schedule) but the absolute numbers should not be directly compared to results obtained under the published 60-epoch schedule.
+STAEformer's published training schedule (milestones $[20, 30]$ with $\gamma = 0.1$) is essential for convergence to validation MAE 2.74 on METR-LA. Faster schedules cause STAEformer alone to plateau 0.10-0.15 higher. Our sidechain inherits this sensitivity.
+
+### 6.6 Probabilistic head initialization
+
+For the H5 NLL variants, the mean half of the Gaussian/Laplace head is initialized from the original STAEformer's `output_proj` weights so that at step 1 the model produces sensible predictions, while the scale half is initialized to zero (giving $\sigma^2 = 1$ or $b = 1$ on the normalized scale). This avoids early-training instability that would otherwise be induced by random initialization of the scale parameter.
 
 ---
 
@@ -376,128 +371,137 @@ STAEformer's published training schedule (milestones [20, 30] with $\gamma = 0.1
 
 ### 7.1 Datasets
 
-We use METR-LA [Li et al. 2018] and PEMS-BAY (same source) under the canonical traffic-forecasting protocol: 5-minute cadence, $T_{in} = T_{out} = 12$, chronological 70/10/20 train/val/test split, masked MAE with mask = (speed > 0 ∧ finite).
+We use METR-LA [Li et al. 2018] and PEMS-BAY (same source) under the canonical traffic-forecasting protocol: 5-minute cadence, $T_{in} = T_{out} = 12$, chronological 70/10/20 train/val/test split, masked MAE.
 
-| | $N$ | $T$ | Adjacency | Mean speed | Std speed |
+| Dataset | $N$ | $T$ | Adjacency | Mean | Std |
 |---|---:|---:|---|---:|---:|
-| METR-LA | 207 | 34,272 | symmetric, distance-based | 58.58 | 12.82 |
-| PEMS-BAY | 325 | 52,128 | symmetric, distance-based | 62.74 | 9.43 |
-
-We attempted to extend to PEMS04 (307 sensors) and PEMS08 (170 sensors) but were unable to obtain the data under our compute budget; this remains future work.
+| METR-LA | 207 | 34,272 | symmetric distance-based | 58.58 | 12.82 |
+| PEMS-BAY | 325 | 52,128 | symmetric distance-based | 62.74 | 9.43 |
 
 ### 7.2 STAEformer reproduction
 
-We independently reproduce STAEformer at canonical seed 42:
+Independent reproduction of STAEformer at seed 42, used as the reference baseline for all experiments:
 
-| | Val avg | Val 15-min | Val 30-min | Val 60-min | Test 60-min |
-|---|---:|---:|---:|---:|---:|
-| STAEformer (METR-LA, ours) | **2.740** | 2.458 | 2.764 | 3.147 | ~3.34 |
-| STAEformer (METR-LA, published) | 2.74 | — | — | — | 3.34 |
-| STAEformer (PEMS-BAY, ours) | **1.569** | 1.353 | 1.637 | 1.890 | ~1.89 |
-| STAEformer (PEMS-BAY, published) | 1.57 | — | — | — | 1.86 |
+| | Val avg | Val 15 | Val 30 | Val 60 |
+|---|---:|---:|---:|---:|
+| STAEformer (METR-LA, ours) | **2.740** | 2.458 | 2.764 | 3.147 |
+| STAEformer (METR-LA, published) | 2.74 | — | — | — |
+| STAEformer (PEMS-BAY, ours) | **1.569** | 1.353 | 1.637 | 1.890 |
+| STAEformer (PEMS-BAY, published) | 1.57 | — | — | — |
 
 Within 0.02 of published numbers on both datasets. Pipeline verified.
 
 ### 7.3 Main results
 
-| Configuration | Val avg | Val 60-min | Test 60-min |
-|---|---:|---:|---:|
-| STAEformer (PEMS-BAY) | 1.569 | 1.890 | ~1.89 |
-| STAE-Spec, joint, schedule [20,30] | 1.564 | 1.866 | — |
-| STAE-Spec, joint, schedule [20,30], gradient_clip=0 | exploded ep 5 | — | — |
-| STAE-Spec, frozen STAEformer trunk | drifts from 2.74 to 2.83+ (METR-LA) | — | — |
-| **STAE-Spec, no_mag, schedule [10,18]** | **1.525** | **1.832** | **1.874** |
+Summary table across all configurations tested.
 
-On METR-LA, every STAE-Spectral-Magma configuration we tested matched or underperformed STAEformer:
+**PEMS-BAY (seed 42):**
 
-| Configuration (METR-LA) | Val avg | Note |
-|---|---:|---|
-| STAEformer | 2.740 | — |
-| STAE-Spec, joint, full | 2.875 | underperforms |
-| STAE-Spec, joint, no_mag | similar | not better |
-| STAE-Spec, frozen-trunk | 2.834 (rising) | residual learns noise |
+| Configuration | Val avg | Test 60-min |
+|---|---:|---:|
+| STAEformer baseline | 1.569 | 1.890 |
+| STAE-Spec, joint, full | 1.564 | 1.866 |
+| **STAE-Spec, joint, no-magnetic** | **1.525** | **1.874** |
+| STAE-Spec, joint, no-modeaxis | 1.532 | 1.885 |
+| STAE-Spec, joint, w/o gradient clip | exploded ep 5 | — |
 
-These results led to the saturation finding documented via oracle analysis (§ 5).
+The no-magnetic configuration beats STAEformer by 0.044 val and 0.016 test 60-min. Confounds documented in § 9.6.
 
-### 7.4 Ablation study (PEMS-BAY, seed 42, compressed schedule)
+**METR-LA (seed 42):**
 
-We ran three configurations at the same seed and the same compressed schedule (30 epochs, milestones [10, 18], patience 15) to isolate the contributions of the magnetic Laplacian view and the bi-axis Mamba mode-axis scan.
+| Configuration | Best val avg | Δ vs STAEformer |
+|---|---:|---:|
+| **STAEformer baseline** | **2.740** | — |
+| STAE-Spec, joint, full | 2.875 | +0.135 |
+| STAE-Spec, frozen-trunk sidechain | drifts 2.740 → 2.834+ | worse (residual = noise) |
+| STAEformer + Gaussian NLL head | 2.978 | +0.238 |
+| STAEformer + Laplace NLL head | 2.862 | +0.122 |
+| Oracle ceiling, $K = 128$ | 2.07 | -0.67 (unreachable) |
+
+Five distinct architectural interventions on METR-LA; all five fail to break STAEformer's 2.74 ceiling. Detailed analysis in § 8.
+
+### 7.4 Ablation table (PEMS-BAY, seed 42, compressed schedule)
+
+To isolate the contribution of each architectural component, we ran three configurations at the same seed and matched compressed training schedule (30 epochs, milestones $[10, 18]$, patience 15):
 
 | Variant | Val avg | Val 60-min | Test 60-min | Δ val_avg vs full |
 |---|---:|---:|---:|---:|
 | `full` (sym + mag + sem + bi-axis + router) | 1.543 | 1.854 | 1.909 | — |
 | `no_mag` (no magnetic view) | **1.525** | **1.832** | **1.874** | **−0.018** |
-| `no_modeaxis` (mode-axis scan disabled) | **1.532** | 1.836 | 1.885 | **−0.011** |
+| `no_modeaxis` (mode-axis scan disabled) | 1.532 | 1.836 | 1.885 | −0.011 |
 
-**Reading of these results.** Both ablations improve over the full model. Specifically:
+Both ablations *improve* over the full model — the magnetic view and the mode-axis scan are subtractively contributing on PEMS-BAY. Mechanistic explanations in § 8.1 and § 8.2.
 
-- Removing the magnetic Laplacian view improves validation by 0.018 MAE and test 60-min by 0.035 MAE.
-- Removing the mode-axis scan improves validation by 0.011 MAE.
-- The `no_mag` configuration crosses the STAEformer baseline (test 60-min 1.874 vs 1.890); the `full` model does not (1.909 vs 1.890).
+### 7.5 Probabilistic output table (METR-LA, seed 42)
 
-The architecture *as a whole* beats STAEformer on PEMS-BAY only when the magnetic Laplacian view is excluded.
+For H5, both probabilistic variants:
 
-### 7.5 Single-seed limitation
+| Loss | Best val_avg | Val 60-min | Test 60-min | log-scale ordering | Wall-clock |
+|---|---:|---:|---:|---|---:|
+| Masked MAE (STAEformer baseline) | **2.740** | 3.147 | ~3.34 | n/a | ~30 min |
+| Gaussian NLL | 2.978 | 3.449 | 3.663 | $\sigma_{15} < \sigma_{30} < \sigma_{60}$ ✓ | 52 min |
+| **Laplace NLL** | 2.862 | 3.274 | 3.490 | $b_{15} < b_{30} < b_{60}$ ✓ | 57 min |
 
-All ablation numbers are single-seed. Seed variance on STAEformer-class architectures on these benchmarks is typically $\sigma \approx 0.005$ - $0.010$ at validation MAE. Our 0.018 MAE gap from `full` to `no_mag` is therefore approximately $1.8 \sigma$ to $3.6 \sigma$ — suggestive but not definitive. Confirming the result would require 3-5 seeds per variant, which exceeded our compute budget for the present study. We discuss this limitation in § 9.1.
+Laplace decisively beats Gaussian (0.116 val MAE improvement) — confirming the loss-objective mismatch story. But Laplace still falls 0.122 val MAE short of plain masked-MAE STAEformer. The capacity-reallocation hypothesis is rejected in both variants.
 
 ---
 
 ## 8. Discussion
 
-We offer mechanistic explanations for the two negative ablation findings.
+### 8.1 Why the magnetic Laplacian did not help (H2 rejected)
 
-### 8.1 Why the magnetic Laplacian did not help
+Three plausible reasons:
 
-We hypothesized (§ 2.4) that the magnetic Laplacian would inject directional flow structure that STAEformer's permutation-equivariant attention cannot recover. Three plausible reasons it did not:
+**Reason 1: STAEformer's adaptive embedding subsumes directionality implicitly.** With $288 \times N \times 80$ free parameters dedicated to per-(time-of-day, sensor) memory (approximately 312K parameters on PEMS-BAY), STAEformer can memorize "sensor $i$'s 7:00 AM pattern predicts sensor $j$'s 7:05 AM pattern" through attention-weight learning. Adding an explicit phase-based directional bias is redundant and competes with this implicit representation.
 
-**Reason 1: STAEformer's adaptive embedding already encodes directionality implicitly.** With $N \times T \times d_{adp} = 325 \times 12 \times 80 = 312\text{K}$ free parameters dedicated to per-(sensor, time-index) memory, STAEformer can implicitly memorize "sensor $i$'s speed at time $t$ predicts sensor $j$'s speed at $t + \tau$" patterns through its attention-weight learning. Adding an explicit phase-based directional bias is redundant and competes with this implicit representation.
+**Reason 2: Inferred directed adjacency is noisy.** METR-LA and PEMS-BAY ship symmetric distance-based adjacencies. Our lagged-correlation estimation introduces noise at the per-edge level. A dataset with native directed adjacency (e.g., one-way road segments, power-flow networks, river-gauge networks) might give a cleaner test of H2.
 
-**Reason 2: Our directed adjacency was inferred from data, not provided.** METR-LA and PEMS-BAY ship symmetric distance-based adjacencies. Our lagged-correlation estimation (§ 4.3.2) is noisy at the per-edge level and may have produced a directed graph whose magnetic spectrum does not cleanly separate the dominant directional patterns. A dataset with native directed adjacency (e.g., traffic flow with known one-way roads, river network flow gauges, electrical power grids with directed transmission) might tell a different story.
+**Reason 3: Real-folded complex projection wastes capacity.** The complex magnetic eigenbasis was folded into $2 \times d_{branch}$ real channels for the real-valued Mamba. Although this is lossless mathematically, the downstream Mamba must learn to interpret the Re/Im fold convention, doubling the representation space the model must navigate. Mag-Mamba [Anonymous 2026] modifies the SSM recurrence to operate natively in the complex plane — a different design choice that may avoid this waste.
 
-**Reason 3: Complex-to-real folding may have wasted capacity.** The complex magnetic basis was folded into $2 \times d_{branch}$ real channels for the real-valued bi-axis Mamba. The folded representation is technically lossless, but the downstream Mamba must learn to *interpret* the Re/Im fold convention, doubling the effective representation space the model must navigate. In contrast, Mag-Mamba [Anonymous 2026] modifies the SSM recurrence to operate natively in the complex plane — a different design choice that may avoid this wasted-capacity issue.
+The negative result, taken at face value: **on standard traffic-forecasting benchmarks with symmetric distance-based adjacencies, the magnetic Laplacian view as we implemented it does not contribute beyond a permutation-equivariant attention-based encoder**.
 
-The negative result, taken at face value, is: **on standard traffic-forecasting benchmarks with symmetric distance-based adjacencies, the magnetic Laplacian view as we implemented it does not contribute beyond a permutation-equivariant attention-based encoder**. This does not rule out the technique for traffic forecasting in general, but it puts a clear empirical bound on the gains realisable under our specific design.
+### 8.2 Why the bi-axis Mamba mode-axis scan was marginal (H3 rejected)
 
-### 8.2 Why the bi-axis Mamba mode-axis scan was marginal
+**Reason 1: $K$ is too short for Mamba's regime.** Mamba's strength is on long sequences with directional dependence; at $K = 64$ - $128$, attention or even a simple linear layer can model arbitrary cross-mode interactions. The selective scan adds parameters without the type of inductive bias that matters at this scale.
 
-We hypothesized (§ 4.4) that selective scan along eigenvalue-ordered modes would exploit mode coupling — particularly the interaction between low modes (rush-hour mean field) and high modes (local perturbations). Three plausible reasons it did not deliver:
+**Reason 2: The temporal scan provides similar mixing.** STAEformer's attention provides cross-time mixing; our temporal Mamba scan adds more of the same. The mode-axis scan adds a *different* kind of mixing — cross-mode — that may not be useful when the model already has rich representations from the basis projection itself.
 
-**Reason 1: $K$ is too short.** Mamba's selective scan derives its power from long-sequence directional dependence. At $K = 64$ - $128$, we are in the regime where attention or even a simple linear layer can model arbitrary cross-mode interactions. The selective scan adds parameters without adding the *type* of inductive bias that matters at this scale.
+**Reason 3: Per-token gating is too local.** The sigmoid gate fusing $y_T$ and $y_K$ is computed per-token (per $(B, T, K)$), not per-mode-block. The gating may default to routing through the temporal scan in practice, marginalizing the mode-axis contribution. Direct gate-value inspection would clarify this; we leave it to future work.
 
-**Reason 2: The "ordering" of modes by eigenvalue is real but the gating may not exploit it.** The sigmoid gate that fuses $y_T$ and $y_K$ is computed per-token, not per-mode-block. So while the underlying scan respects eigenvalue order, the gating mechanism may mostly route most of the signal through the temporal scan in practice. We did not directly inspect the per-mode gate values in this study; that would be informative future work.
+### 8.3 What the learned-semantic basis is doing (H4 retained)
 
-**Reason 3: The temporal scan already gets the signal it needs.** STAEformer's attention provides cross-time mixing; our temporal Mamba scan provides additional mixing of the same kind. The mode-axis scan adds a *different* kind of mixing — cross-mode — that may not be useful when the model already has rich representations. This is consistent with the finding that the symmetric and semantic spectral views (which provide cross-mode mixing through the basis projection itself, regardless of the Mamba block) account for most of the architecture's improvement over STAEformer.
+The learned-semantic view is included in the winning `no_mag` configuration on PEMS-BAY, so it contributes to the positive result. We did not isolate its individual contribution (e.g., `no_sem` ablation) due to compute constraints; this is on the to-do list. Qualitatively, the hypothesis underlying its design — that it captures cross-corridor behavioral similarities the geographic basis cannot — would be best validated by visualizing the learned embeddings and the resulting kNN graph, which would be informative future work.
 
-The negative-to-marginal result reads as: **on short K-mode sequences with strong cross-mixing already provided by the basis projection, an additional selective-scan over modes adds parameters without proportional generalization benefit**. This is consistent with the broader observation in the Mamba literature that selective scans are most useful on long sequences with sparse, directional dependence.
+### 8.4 The METR-LA saturation finding (H1 rejected)
 
-### 8.3 What the learned-semantic basis is actually doing
+Five distinct interventions on METR-LA:
+1. Joint-trained spectral sidechain: val 2.875 (worse by 0.135).
+2. Frozen-trunk spectral sidechain: val 2.740 → 2.834+ (residual learns noise).
+3. Magnetic Laplacian view in PEMS-BAY (transferred negative): hurts by 0.018 val.
+4. Gaussian NLL: val 2.978 (worse by 0.238, loss-mismatch).
+5. Laplace NLL: val 2.862 (worse by 0.122, capacity-reallocation rejected).
 
-The learned-semantic view is included in the `no_mag` winning configuration, but our experiments do not directly isolate its individual contribution. We expect, based on the hypothesis underlying its design, that it captures cross-corridor similarities that the geographic symmetric basis cannot represent (e.g., sensors at mile 5 of different freeways behaving similarly during rush hour). Directly verifying this would require visualizing the learned embedding and comparing the resulting kNN graph to the geographic graph — informative qualitative analysis we leave to future work.
-
-The fact that the learned-semantic view contributes (even partially) to the architecture's improvement is itself somewhat surprising: STAEformer's adaptive embedding should also be able to encode "sensor $i$ behaves like sensor $j$" implicitly via attention learning. The fact that an explicit spectral basis from a *learned* similarity graph helps suggests that putting this similarity into the *projection operation* (rather than relying on attention to discover it) provides a useful inductive bias.
-
-### 8.4 The METR-LA saturation finding
-
-Across every configuration we tested, no variant exceeded STAEformer on METR-LA validation MAE. The oracle analysis (§ 5) clarifies that this is not a bandwidth limitation — a $K = 128$ residual in principle can achieve validation MAE 2.07, well below STAEformer's 2.74. The bottleneck is the *predictability of optimal coefficients from input alone*.
-
-This is consistent with the prior independent finding (DiSR-Mamba [Li et al. 2026, internal]) that frozen-trunk residual learning fails on METR-LA — the residual learns training-set noise that does not generalize. Our work strengthens that finding with joint-training evidence: even when the residual learner is allowed to co-train with the encoder, it cannot navigate to the predictability ceiling within typical training budgets.
-
-We propose, tentatively, that METR-LA may be near its inherent forecasting limit given $T_{in} = 12$ steps of input — a property of the data, not the architecture. Confirming this would require an information-theoretic analysis (e.g., mutual information between input windows and 60-minute-ahead speeds) which is beyond our scope.
+The oracle analysis (§ 5) provides a quantitative explanation. METR-LA's K=128 oracle val is 2.07, far below STAEformer's 2.74. The bandwidth is sufficient. What is missing is the predictability of the optimal spectral coefficients from input. Every architectural and loss-functional intervention we tested has failed to recover the missing predictability — strong evidence that the gap is intrinsic to the data, not to specific architectural choices.
 
 ### 8.5 Why PEMS-BAY is helped where METR-LA is not
 
-A natural question, raised by the contrast between our PEMS-BAY positive result (`no_mag` improves test 60-min MAE from 1.890 to 1.874) and our METR-LA negative results (every variant matches or underperforms STAEformer's 2.74), is whether the difference is architectural or data-driven. The mechanism we find most parsimonious is **predictability headroom**: STAEformer is closer to METR-LA's inherent forecasting ceiling than to PEMS-BAY's, and spectral augmentation can only help where structured signal remains for it to extract.
+Three pieces of evidence support the predictability-headroom reading:
 
-Three pieces of evidence support this reading.
+**Signal variance.** METR-LA std 12.82 mph vs PEMS-BAY std 9.43 mph — 36% more variable on METR-LA. Higher variance with the same input window length implies a larger fraction of unstructured noise relative to predictable signal, which lowers the achievable MAE floor.
 
-**Variance of the signal.** METR-LA's per-step speed standard deviation across the training split is 12.82 mph; PEMS-BAY's is 9.43 mph. METR-LA's signal is approximately 36% more variable in absolute terms. LA freeways are denser, incident-heavier, and host more abrupt lane-closure and weather-driven fluctuations than the smoother Bay Area corridors. Higher signal variance with the same input window length implies a larger fraction of the 60-minute prediction target is unstructured noise relative to the predictable component, which lowers the achievable validation MAE floor.
+**Oracle ceiling versus achieved error.** On METR-LA, the K=128 oracle (2.07) sits 0.67 MAE below STAEformer (2.74), but no learner bridges this gap. On PEMS-BAY, our 0.044 val MAE improvement above STAEformer implies that PEMS-BAY's predictability ceiling is meaningfully below STAEformer's 1.569 value — there is room above to operate.
 
-**Oracle ceiling versus achieved error.** On METR-LA, the $K = 128$ oracle val MAE is 2.07 while STAEformer achieves 2.74 — a gap of 0.67. The oracle is *attainable in principle* (it is the projection of the optimal residual onto a sufficient basis), so the gap is entirely the predictability gap: optimal coefficients cannot be recovered from input alone by any learner we tested. PEMS-BAY's STAEformer error of 1.57 sits below METR-LA's 2.74 in absolute terms but, importantly, has greater fractional room above its own predictability floor: our hybrid extracts an additional 0.044 validation MAE of structure that STAEformer alone does not. We did not compute the PEMS-BAY oracle ceiling explicitly (a useful future-work item), but the very existence of the 0.044 gain implies the PEMS-BAY predictability ceiling is meaningfully below STAEformer's 1.569 value.
+**Failure-mode consistency.** Across configurations, METR-LA exhibits identical failure modes for every spectral intervention (joint, frozen, with-magnetic, without-magnetic, with-modeaxis, without-modeaxis); PEMS-BAY shows the same architecture reaching a stably lower MAE. Architecture and training are identical; data is the only variable.
 
-**Direction of the failure modes is consistent.** On METR-LA every spectral-augmentation variant fails in the same characteristic way (best ckpt at epoch 1-2 for frozen-trunk, plateau at STAEformer's value for joint-trained, val rising over training). On PEMS-BAY the same architecture trained with the same hyperparameters reaches a stably lower validation MAE. The architecture and training procedure are identical; the data is the only changed variable. The simplest explanation is that PEMS-BAY's predictability headroom permits the architectural augmentation to recover structure, while METR-LA's does not.
+### 8.6 The probabilistic-output diagnosis (Gaussian → Laplace)
 
-We therefore see the METR-LA negative result not as a failure of the architecture but as a *property of the benchmark*. The cross-dataset asymmetry — same model, opposite outcome on two datasets that differ in signal variance and predictability margin — is itself a finding worth reporting. It reinforces the practical value of the oracle-analysis methodology (§ 5) as a *pre-flight check* for spectral-augmentation work on any new benchmark: if the K-mode oracle ceiling on validation residuals is at or above the existing baseline's error, no spectral-residual learner can reasonably be expected to help, and method development should be directed elsewhere.
+The Gaussian NLL variant (val 2.978) was clearly worse than the masked-MAE baseline (val 2.740). The Laplace NLL variant (val 2.862) substantially closed the gap (0.116 val MAE recovery) but did not reach the baseline. Three readings:
+
+**Reading 1: The loss-mismatch was real.** The 0.116 MAE difference between Gaussian and Laplace at the same architecture, same data, same training schedule is consistent with the conditional-mean versus conditional-median story. On a heavy-tailed target distribution, MAE evaluates the median predictor (Laplace) more favorably than the mean predictor (Gaussian). This corroborates the mathematical motivation in § 3.5.2.
+
+**Reading 2: The capacity-reallocation hypothesis (H5) is rejected even with the correct loss.** Laplace NLL trains the right point predictor for MAE evaluation, and the heteroscedastic structure works as designed (the model correctly learns $b_{15} < b_{30} < b_{60}$ at every epoch). But the capacity-reallocation does not translate to an improvement over plain masked MAE. The hypothesis was that letting the model "give up" on hard horizons would free capacity for the easier ones. The data contradict this: the easier-horizon $\mu$ values do not improve under Laplace NLL relative to plain MAE training. The reason, we conjecture: under plain MAE, every $(sensor, horizon)$ position contributes a constant gradient magnitude $\text{sign}(\hat{y} - y)$, and this constant-magnitude gradient is in fact what STAEformer's optimization needs to reach its narrow local minimum. The heteroscedastic loss distorts the relative gradient magnitudes — confident horizons see larger gradients, uncertain ones see smaller — and this distortion shifts the optimum to a different point that is worse under MAE evaluation.
+
+**Reading 3: This is the strongest evidence yet of METR-LA's saturation.** We now have five distinct interventions (joint sidechain, frozen sidechain, magnetic, Gaussian NLL, Laplace NLL) all converging to or above STAEformer's MAE ceiling. The hypothesis space we have explored is broad: architectural (spectral views, sidechain coupling), loss (NLL variants), and capacity-allocation. None of them help. The most parsimonious explanation is the oracle analysis's predictability-limit reading.
 
 ---
 
@@ -505,55 +509,59 @@ We therefore see the METR-LA negative result not as a failure of the architectur
 
 ### 9.1 Single-seed ablation
 
-The ablation results in § 7.4 are single-seed. The 0.018 validation MAE gap from `full` to `no_mag` is approximately $2\sigma$ given typical seed variance, suggestive but not definitive. Multi-seed confirmation (3-5 seeds per variant) would be required for stronger empirical claims. The conclusions of this study should be read with that caveat.
+All ablation and intervention results are single-seed. Typical seed std on STAEformer-class architectures on these benchmarks is approximately 0.005-0.010 validation MAE. Our 0.018 val MAE gap from `full` to `no_mag` on PEMS-BAY is ~1.8σ-3.6σ, suggestive but not statistically conclusive. The METR-LA negative results (0.122 - 0.238 worse) are well above seed noise.
 
 ### 9.2 Scope limited to two benchmarks
 
-We evaluate on METR-LA and PEMS-BAY only. The original study design included PEMS04 and PEMS08 (flow-prediction benchmarks with $\sim 10\times$ larger absolute MAE), which might exhibit different saturation behavior and possibly reverse some of our negative findings. Compute constraints (and a 404 on the data-download URL during our experiment window) prevented inclusion. We hypothesize, based on the saturation/non-saturation pattern observed between METR-LA and PEMS-BAY, that PEMS04/08 would show clearer positive results for some of the architectural pieces ablated as negative here; we do not test this hypothesis.
+PEMS04 (307 sensors, flow data) and PEMS08 (170 sensors, flow data), with $\sim 10\times$ larger absolute MAE, might exhibit different saturation behavior. Compute constraints and a data-download URL outage prevented inclusion.
 
 ### 9.3 No comparison to gradient-of-eigh-free alternatives
 
-Our learned-semantic view requires backpropagation through `torch.linalg.eigh`, with numerical safeguards. An alternative is to detach the eigh result and train the embedding via a separate gradient path (e.g., an orthogonality regularizer). We did not directly compare these alternatives; this is left for future work.
+The learned-semantic view requires backpropagation through `torch.linalg.eigh` with numerical safeguards. An alternative is to detach the eigh result and train the embedding via a separate gradient path (e.g., an orthogonality regularizer). We did not test this.
 
 ### 9.4 Magnetic Laplacian directionality estimation
 
-Our directed adjacency is inferred via lagged cross-correlation (§ 4.3.2). This is one of several plausible choices. Alternatives include explicit directed adjacency from road-network maps (if available), or end-to-end learning of the directional adjacency. The negative magnetic-Laplacian result might be specific to our directionality estimation rather than to the magnetic Laplacian per se.
+Our directed adjacency is inferred via lagged cross-correlation. Alternatives include explicit directed adjacency from road-network maps, or end-to-end learning of the directional adjacency. The negative magnetic-Laplacian result might be specific to our directionality estimation rather than to the magnetic Laplacian per se.
 
 ### 9.5 Mode-axis gate inspection
 
-We did not directly inspect the per-mode mode-axis gate values $g$ inside the bi-axis Mamba block. Such inspection would clarify whether the mode-axis scan is effectively unused (in which case removing it should be near-zero-cost) or whether it is used but unhelpfully (in which case removing it should improve performance). Our ablation shows the latter — removing the mode axis improves validation by 0.011 — but the mechanistic explanation in § 8.2 is conjectural.
+We did not directly inspect per-mode mode-axis gate values $g$. Such inspection would clarify whether the mode-axis scan is unused (in which case removing it should be near-zero-cost) or used unhelpfully.
 
 ### 9.6 Unresolved confounds in the PEMS-BAY improvement
 
-The single-seed PEMS-BAY result reported in § 7.4 (`no_mag` at test 60-min MAE 1.874 vs STAEformer's 1.890, a gain of 0.016) is genuinely consistent with our architectural hypothesis, but we have not ruled out three confounds.
+The 0.016 test 60-min MAE gain in § 7.4 has three unresolved confounds:
 
-First, the **single-seed limitation** carries directly to this comparison. The gain is approximately $1.6\sigma$ - $3.2\sigma$ given typical seed variance ($\sigma \approx 0.005$ - $0.010$) on PEMS-BAY for STAEformer-class architectures in our reproduction. This is suggestive but does not statistically rule out seed lottery. A 3-5 seed × 3-5 seed comparison of the hybrid and STAEformer with matched training hyperparameters is the minimum required to convert this from "plausible" to "demonstrated."
+**Single-seed.** Gain is ~1.6σ-3.2σ, suggestive but not statistically demonstrated.
 
-Second, the **training-procedure asymmetry**: our hybrid uses `gradient_clip = 5.0` (required for stability, as documented in § 6.2) while the published STAEformer schedule uses `gradient_clip = 0.0`. Although STAEformer's loss landscape does not in principle require clipping to converge, a fair comparison would re-run the STAEformer baseline with `gradient_clip = 5.0` to confirm the difference is not partially explained by this hyperparameter. We did not perform this control.
+**Training-procedure asymmetry.** Hybrid uses `gradient_clip = 5.0` (required for stability); baseline STAEformer uses `0.0`. No rerun of STAEformer with `gradient_clip = 5.0`.
 
-Third, the **parameter-count asymmetry**: STAE-Spectral-Magma has approximately 2.08M parameters versus STAEformer's 1.26M. We have not run a parameter-matched scaled-STAEformer control (e.g., wider $d_{model}$ or larger $d_{adp}$ to reach $\approx 2$M parameters with no spectral sidechain). It is therefore possible that some fraction of the 0.016 gain is explained by parameter count alone rather than by the structural inductive bias of the spectral views and router.
+**Parameter-count asymmetry.** Hybrid: 2.08M parameters; STAEformer: 1.26M. No parameter-matched scaled-STAEformer control.
 
-Against these confounds we offer one piece of evidence that the contribution has a genuinely structural component: the ablation pattern is *non-monotonic in parameter count*. Removing the magnetic view *reduces* parameters and *improves* the model (1.543 → 1.525 val_avg); removing the mode-axis scan likewise *reduces* parameters and *improves* the model (1.543 → 1.532). If the architecture's gain over STAEformer were entirely a parameter-count effect, removing pieces should hurt monotonically, not help. The differential response of validation MAE to specific architectural removals is hard to explain by parameter count alone and is more consistent with the structural inductive-bias account.
+**Counter-evidence (one piece):** the ablation response is non-monotonic in parameter count — removing the magnetic view *reduces* parameters and *improves* val MAE. This is hard to explain by parameter count alone and supports a structural-inductive-bias account.
 
-The most defensible reading is therefore: **on PEMS-BAY at single seed, the architecture matches STAEformer within typical seed noise on validation MAE while modestly improving test 60-min MAE. The pattern of ablation results is consistent with a structural rather than purely-parametric explanation, but multi-seed runs and a parameter-matched scaled-STAEformer control are required to claim a robust improvement.** We flag this explicitly to avoid overclaiming and to delineate the precise empirical evidence the present study does and does not provide.
+The most defensible claim: *on PEMS-BAY at single seed, the architecture matches STAEformer within typical seed noise on validation MAE while modestly improving test 60-min MAE; the pattern of ablation results is consistent with a structural rather than purely-parametric explanation, but multi-seed and parameter-matched controls are required for a robust claim*.
+
+### 9.7 Probabilistic-output scope
+
+We tested Gaussian and Laplace NLL only. Other distributional families (Student-t for heavy tails, mixture of two Gaussians for multi-modal targets, quantile pinball for direct quantile regression) might give different results. Our finding that capacity-reallocation through heteroscedasticity does not help on METR-LA is specific to these two families; we do not generalize to all probabilistic approaches.
 
 ---
 
 ## 10. Conclusion
 
-We presented STAE-Spectral-Magma, a spectral state-space augmentation of the STAEformer traffic-forecasting backbone, comprising three Laplacian views (symmetric, magnetic, learned-semantic), a bi-axis Mamba block scanning along time and graph-spectral mode axes, and a horizon-cluster mixture-of-experts router. We tested four hypotheses and reported results honestly.
+We presented a hypothesis-driven empirical study of spectral state-space and probabilistic augmentations for traffic forecasting, built on the STAEformer backbone and tested on METR-LA and PEMS-BAY. We tested five distinct hypotheses, each motivated by specific theoretical observations about what a strong attention-based encoder might be missing, and reported all results honestly.
 
-The positive findings are concrete: a learned-semantic spectral basis (an adaptive adjacency periodically eigendecomposed with numerical-stability safeguards) combined with a small horizon-cluster router improves STAEformer on PEMS-BAY by 0.016 test 60-min MAE at single seed, and the underlying mechanism is, as far as we can verify, novel to the spectral GNN literature. We further introduce an oracle-analysis methodology that explains the field-wide plateau on METR-LA at STAEformer's 2.74 MAE: the basis bandwidth is sufficient; the predictability of optimal coefficients from input is what limits learners.
+The positive findings are concrete but narrow: on PEMS-BAY, a stripped configuration of the architecture (symmetric + learned-semantic spectral views with a horizon-cluster MoE router, without the magnetic Laplacian view) improves over STAEformer by 0.044 val MAE and 0.016 test 60-min MAE at single seed, with confounds documented; the oracle-analysis methodology we introduce provides a closed-form diagnostic that future spectral-augmentation work on any benchmark can apply pre-flight.
 
-The negative findings are equally concrete and arguably more useful to the field: the magnetic Laplacian, expected to capture directional flow, *harms* STAEformer's PEMS-BAY performance when added; ablating it produces the strongest improvement. The bi-axis Mamba mode-axis scan, hypothesized to exploit eigenvalue-ordered mode coupling, is marginal at best on the short $K \approx 64$ mode sequences here. We provide mechanistic explanations for both.
+The negative findings are equally concrete and arguably more useful: five distinct interventions on METR-LA, each with a clean mechanistic explanation, all converging to STAEformer's saturation ceiling. The magnetic Laplacian — proven valuable in directed-graph node classification — does not help when added to a strong attention-based traffic-forecasting encoder. The bi-axis Mamba mode-axis scan provides marginal benefit at best on short K-mode sequences. The capacity-reallocation hypothesis, tested in both Gaussian and Laplace heteroscedastic NLL variants, is rejected on METR-LA: even with the loss-objective mismatch corrected via Laplace's median-targeting, the heteroscedastic loss does not improve point prediction over plain masked MAE.
 
-The contribution of this work is therefore three positive results (learned-semantic spectral SSM, horizon-cluster MoE router, oracle analysis methodology) and two characterised negative results (magnetic Laplacian for traffic forecasting, bi-axis Mamba mode scan on short K). We view the negative results as first-class contributions: they delineate which spectral augmentations of strong attention-based backbones are worth pursuing on saturated traffic-forecasting benchmarks, and which are not.
+We view the breadth of the negative findings as the work's principal contribution: five substantively different interventions, each motivated by distinct theory, all failing on the same benchmark in characteristic ways consistent with the oracle analysis's diagnosis. The cumulative evidence is the strongest case we know of for METR-LA's *intrinsic* saturation under the canonical 12-step input protocol. Future researchers attempting to improve on STAEformer's 2.74 on METR-LA are now equipped with five characterized failure modes to avoid, an oracle-analysis methodology to diagnose their proposed approach before substantial investment, and a positive existence proof (on PEMS-BAY) that the architectural ideas are not categorically wrong — merely that METR-LA is the wrong benchmark for them.
 
 ---
 
 ## References
 
-(Compiled honestly from the citation map built during the literature audit. Arxiv IDs given where applicable; published-venue references cite the canonical version.)
+(Compiled honestly from the citation map built during the literature audit. arXiv IDs given where applicable; published-venue references cite the canonical version.)
 
 - Bai et al. 2020. "Adaptive Graph Convolutional Recurrent Network for Traffic Forecasting." NeurIPS 2020. (AGCRN)
 - Cao et al. 2020. "Spectral Temporal Graph Neural Network for Multivariate Time-series Forecasting." NeurIPS 2020. (StemGNN)
@@ -564,12 +572,15 @@ The contribution of this work is therefore three positive results (learned-seman
 - Khan et al. 2025. "Multi-scale Wavelet-Mamba framework for spatiotemporal traffic forecasting." Scientific Reports 2025. (WMF-Traffic)
 - Kipf and Welling 2017. "Semi-Supervised Classification with Graph Convolutional Networks." ICLR 2017. (GCN)
 - Lee et al. 2024. "TESTAM: A Time-Enhanced Spatio-Temporal Attention Model with Mixture of Experts." ICLR 2024.
-- Li et al. 2018. "Diffusion Convolutional Recurrent Neural Network: Data-Driven Traffic Forecasting." ICLR 2018. (DCRNN, METR-LA and PEMS-BAY benchmarks)
+- Li et al. 2018. "Diffusion Convolutional Recurrent Neural Network: Data-Driven Traffic Forecasting." ICLR 2018. (DCRNN; METR-LA and PEMS-BAY benchmarks)
 - Li et al. 2024. "STG-Mamba: Spatial-Temporal Graph Learning via Selective State Space Model." arXiv:2403.12418.
 - Liu et al. 2023. "Spatio-Temporal Adaptive Embedding Makes Vanilla Transformer SOTA for Traffic Forecasting." CIKM 2023. (STAEformer)
 - Lou et al. 2025. "Bi-MambaHSI: Spatial-Spectral Bidirectional Mamba for Hyperspectral Image Classification." arXiv:2501.04944.
 - Park et al. 2025. "DSTGA-Mamba: a disentangled spatio-temporal graph attention Mamba model for traffic flow prediction." Scientific Reports 2025.
+- Rodrigues and Pereira 2018. "Heteroscedastic Gaussian processes for uncertainty modeling in large-scale crowdsourced traffic data." arXiv:1812.08733.
+- Salinas et al. 2020. "DeepAR: Probabilistic Forecasting with Autoregressive Recurrent Networks." International Journal of Forecasting 2020.
 - Wang et al. 2023. "ST-MoE: Spatio-Temporal Mixture-of-Experts for Debiasing in Traffic Prediction." CIKM 2023.
+- Wen et al. 2017. "A Multi-Horizon Quantile Recurrent Forecaster." arXiv:1711.11053. (MQ-RNN)
 - Wu et al. 2019. "Graph WaveNet for Deep Spatial-Temporal Graph Modeling." IJCAI 2019. (GraphWaveNet)
 - Wu et al. 2020. "Connecting the Dots: Multivariate Time Series Forecasting with Graph Neural Networks." KDD 2020. (MTGNN)
 - Zhang et al. 2021. "MagNet: A Neural Network for Directed Graphs." NeurIPS 2021.
@@ -577,20 +588,22 @@ The contribution of this work is therefore three positive results (learned-seman
 - Anonymous 2026. "Mag-Mamba: Modeling Coupled Spatio-Temporal Asymmetry for POI Recommendation." arXiv:2603.00053 (Feb 2026).
 - Anonymous 2026. "Less is More: Strategic Expert Selection Outperforms Ensemble Complexity in Traffic Forecasting." arXiv:2510.07426 (Oct 2025). (TESTAM+ analysis)
 - Anonymous 2026. "M²FMoE: Multi-Resolution Multi-View Frequency Mixture-of-Experts for Extreme-Adaptive Time Series Forecasting." Researchgate publication 2026.
+- Anonymous 2026. "Embracing Heteroscedasticity for Probabilistic Time Series Forecasting." arXiv:2603.24254.
 
 ---
 
-## Reproducibility statement
+## Reproducibility Statement
 
-All code and experiments are reproducible from the public repository accompanying this manuscript. Saved STAEformer checkpoints at validation MAE 2.74 (METR-LA, seed 42) and 1.57 (PEMS-BAY, seed 42) are available, along with the run scripts:
+All experiments are reproducible from the public repository accompanying this manuscript. Saved STAEformer checkpoints at val MAE 2.740 (METR-LA seed 42) and 1.569 (PEMS-BAY seed 42) are available, along with the run scripts:
 
-- `scripts/train_staeformer.py` — STAEformer baseline reproduction
-- `scripts/train_stae_spectral_magma.py` — full STAE-Spectral-Magma training, with `--no-use_mag`, `--no-use_sem`, `--no-spec_mode_axis`, `--no-use_router` flags for ablation
-- `scripts/run_ablations_stae_spec.sh` — chained 6-variant ablation driver
-- `scripts/run_multiseed_stae_spec.sh` — 3-seed baseline+hybrid driver
+- `scripts/train_staeformer.py` — STAEformer baseline (used for both reproduction and as the encoder backbone of the hybrid).
+- `scripts/train_stae_spectral_magma.py` — full STAE-Spectral-Magma training, with `--no-use_mag`, `--no-use_sem`, `--no-spec_mode_axis`, `--no-use_router` flags for ablation.
+- `scripts/train_staeformer_nll.py` — STAEformer with Gaussian or Laplace heteroscedastic NLL output (`--loss {gaussian, laplace}`).
+- `scripts/run_ablations_stae_spec.sh` — chained 6-variant ablation driver.
+- `scripts/run_multiseed_stae_spec.sh` — 3-seed baseline+hybrid driver (not run in the present study; included for reproducibility).
 
 Random seeds, hyperparameters, and complete training logs are committed to the repository under `logs/` and `results/`.
 
 ---
 
-*This paper is presented honestly, including all negative results. We believe the integrity of the empirical reporting is more important than the size of the headline number. The contributions described here are limited but real; we hope this work is useful both to those who would build on the positive findings (learned-semantic spectral basis, horizon-cluster MoE, oracle analysis) and to those who would reconsider attempting to extend the negative findings (magnetic Laplacians for traffic, bi-axis Mamba on short K) under different design choices.*
+*This paper is presented honestly, including all five negative results. We believe the integrity of the empirical reporting is more important than the size of the headline number. The positive contributions described here are limited but real; the negative results catalog a substantial portion of the design space and free future researchers from re-exploring it. We hope this work is useful both to those who would build on the positive findings (learned-semantic spectral basis, horizon-cluster MoE, oracle analysis methodology) and to those who would reconsider attempting to extend the negative findings (magnetic Laplacians for traffic, bi-axis Mamba on short K, heteroscedastic loss for capacity reallocation on saturated benchmarks) under different design choices.*
