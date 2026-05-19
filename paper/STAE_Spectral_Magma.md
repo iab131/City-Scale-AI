@@ -523,6 +523,20 @@ Our directed adjacency is inferred via lagged cross-correlation (§ 4.3.2). This
 
 We did not directly inspect the per-mode mode-axis gate values $g$ inside the bi-axis Mamba block. Such inspection would clarify whether the mode-axis scan is effectively unused (in which case removing it should be near-zero-cost) or whether it is used but unhelpfully (in which case removing it should improve performance). Our ablation shows the latter — removing the mode axis improves validation by 0.011 — but the mechanistic explanation in § 8.2 is conjectural.
 
+### 9.6 Unresolved confounds in the PEMS-BAY improvement
+
+The single-seed PEMS-BAY result reported in § 7.4 (`no_mag` at test 60-min MAE 1.874 vs STAEformer's 1.890, a gain of 0.016) is genuinely consistent with our architectural hypothesis, but we have not ruled out three confounds.
+
+First, the **single-seed limitation** carries directly to this comparison. The gain is approximately $1.6\sigma$ - $3.2\sigma$ given typical seed variance ($\sigma \approx 0.005$ - $0.010$) on PEMS-BAY for STAEformer-class architectures in our reproduction. This is suggestive but does not statistically rule out seed lottery. A 3-5 seed × 3-5 seed comparison of the hybrid and STAEformer with matched training hyperparameters is the minimum required to convert this from "plausible" to "demonstrated."
+
+Second, the **training-procedure asymmetry**: our hybrid uses `gradient_clip = 5.0` (required for stability, as documented in § 6.2) while the published STAEformer schedule uses `gradient_clip = 0.0`. Although STAEformer's loss landscape does not in principle require clipping to converge, a fair comparison would re-run the STAEformer baseline with `gradient_clip = 5.0` to confirm the difference is not partially explained by this hyperparameter. We did not perform this control.
+
+Third, the **parameter-count asymmetry**: STAE-Spectral-Magma has approximately 2.08M parameters versus STAEformer's 1.26M. We have not run a parameter-matched scaled-STAEformer control (e.g., wider $d_{model}$ or larger $d_{adp}$ to reach $\approx 2$M parameters with no spectral sidechain). It is therefore possible that some fraction of the 0.016 gain is explained by parameter count alone rather than by the structural inductive bias of the spectral views and router.
+
+Against these confounds we offer one piece of evidence that the contribution has a genuinely structural component: the ablation pattern is *non-monotonic in parameter count*. Removing the magnetic view *reduces* parameters and *improves* the model (1.543 → 1.525 val_avg); removing the mode-axis scan likewise *reduces* parameters and *improves* the model (1.543 → 1.532). If the architecture's gain over STAEformer were entirely a parameter-count effect, removing pieces should hurt monotonically, not help. The differential response of validation MAE to specific architectural removals is hard to explain by parameter count alone and is more consistent with the structural inductive-bias account.
+
+The most defensible reading is therefore: **on PEMS-BAY at single seed, the architecture matches STAEformer within typical seed noise on validation MAE while modestly improving test 60-min MAE. The pattern of ablation results is consistent with a structural rather than purely-parametric explanation, but multi-seed runs and a parameter-matched scaled-STAEformer control are required to claim a robust improvement.** We flag this explicitly to avoid overclaiming and to delineate the precise empirical evidence the present study does and does not provide.
+
 ---
 
 ## 10. Conclusion
