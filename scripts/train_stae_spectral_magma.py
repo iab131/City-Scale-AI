@@ -169,6 +169,14 @@ def main():
     print(f"[data] |tr|={len(tr.dataset)} |va|={len(va.dataset)} "
           f"|te|={len(te.dataset)}", flush=True)
 
+    # Auto-detect N from data so callers don't need to remember to pass it.
+    # (METR-LA→207, PEMS-BAY→325, PEMS04→307, PEMS08→170.)
+    if args.N != X.shape[1]:
+        if args.N != 207:
+            print(f"[warn] --N {args.N} overridden by data N {X.shape[1]}",
+                  flush=True)
+        args.N = X.shape[1]
+
     _, _, A = load_adj_pkl(args.adj_path)
     A = np.asarray(A, dtype=np.float32)
     cache_root = os.path.join(args.cache_dir, "disr")
