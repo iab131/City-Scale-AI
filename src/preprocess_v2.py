@@ -11,7 +11,17 @@ and the windowed inputs change.
 import os
 import numpy as np
 
-from data_utils import load_metr_la_h5, load_adj_pkl
+from data_utils import load_metr_la_h5, load_pems_npz, load_adj_pkl
+
+
+def _load_traffic(path: str) -> np.ndarray:
+    """Dispatcher: .h5 -> METR-LA / PEMS-BAY loader,  .npz -> PEMS04/08 loader."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".h5":
+        return load_metr_la_h5(path)
+    if ext == ".npz":
+        return load_pems_npz(path, feature="flow")
+    raise ValueError(f"unsupported data extension: {ext} ({path})")
 from graph_utils import normalized_laplacian
 from gft import compute_gft_basis, gft
 
@@ -21,10 +31,14 @@ SECONDS_PER_DAY = 24 * 3600
 
 
 def compute_masked_stats(X, missing_val=0.0):
-    """Mean/std computed across (T, N), ignoring entries equal to missing_val."""
-    mask = X != missing_val  # [T, N] bool
-    # per-sensor stats are robust because each sensor has different scale
-    # but METR-LA convention is global stats. Use global to match published baselines.
+    """Mean/std computed across (T, N), ignoring missing entries.
+
+    Two missing-value conventions are supported:
+      - METR-LA: missing = 0.0 (sensor outage encoded as zero speed)
+      - PEMS-BAY: missing = NaN (DCRNN distribution preserves NaN)
+    The mask returned is True where the value is valid (non-missing AND finite).
+    """
+    mask = (X != missing_val) & np.isfinite(X)
     valid = X[mask]
     mean = valid.mean()
     std = valid.std() + 1e-6
@@ -117,7 +131,7 @@ def get_cached_v2_data(data_path, adj_path, k, cache_dir="cache/gft"):
     tod_p = os.path.join(cache_dir, "v2_tod.npy")
     dow_p = os.path.join(cache_dir, "v2_dow.npy")
 
-    X = load_metr_la_h5(data_path)
+    X = _load_traffic(data_path)
     T, N = X.shape
 
     if os.path.exists(mean_p) and os.path.exists(std_p):
@@ -150,7 +164,12 @@ def get_cached_v2_data(data_path, adj_path, k, cache_dir="cache/gft"):
         np.save(tod_p, tod)
         np.save(dow_p, dow)
 
-    missing_mask = (X != 0).astype(np.float32)  # 1 where valid
+    # 1 where the speed reading is valid (non-zero AND finite).
+    missing_mask = ((X != 0) & np.isfinite(X)).astype(np.float32)
+    # Replace any NaN/inf in X with 0 so downstream normalization is safe.
+    # The mask above already records which entries are real, so this zero
+    # fill is only a placeholder that the mask will block out.
+    X = np.where(np.isfinite(X), X, 0.0).astype(np.float32)
     # Important: use masked-normalization on the whole series (eval uses train stats)
     X_norm = (X - mean) / std
 

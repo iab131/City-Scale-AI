@@ -67,10 +67,19 @@ def parse_args():
     p.add_argument("--alpha_init", type=float, default=1.0)
     p.add_argument("--alpha_max", type=float, default=1.5)
 
-    p.add_argument("--use_sym", action="store_true", default=True)
-    p.add_argument("--use_mag", action="store_true", default=True)
-    p.add_argument("--use_sem", action="store_true", default=True)
-    p.add_argument("--use_router", action="store_true", default=True)
+    # Architecture switches with --flag / --no-flag form (BooleanOptionalAction
+    # is Python 3.9+; both forms have default=True so absence of flag keeps
+    # the full model and `--no-X` cleanly disables an individual piece for
+    # ablation runs).
+    p.add_argument("--use_sym", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--use_mag", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--use_sem", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--use_router", action=argparse.BooleanOptionalAction,
+                   default=True)
+    p.add_argument("--spec_mode_axis", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="Bi-axis (T × K) selective scan. --no-spec_mode_axis "
+                        "disables the mode-axis scan for ablation.")
 
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--epochs", type=int, default=80)
@@ -82,6 +91,10 @@ def parse_args():
     p.add_argument("--gradient_clip", type=float, default=5.0)
     p.add_argument("--use_amp", action="store_true", default=True)
     p.add_argument("--num_workers", type=int, default=4)
+    p.add_argument("--frozen_stae_ckpt", type=str, default="",
+                   help="Path to a trained STAEformer checkpoint. If set, "
+                        "STAEformer encoder weights are loaded and frozen; "
+                        "only the spectral sidechain trains.")
     return p.parse_args()
 
 
@@ -214,17 +227,37 @@ def main():
             "alpha_init": args.alpha_init, "alpha_max": args.alpha_max,
             "use_sym": args.use_sym, "use_mag": args.use_mag,
             "use_sem": args.use_sem, "use_router": args.use_router,
+            "spec_mode_axis": args.spec_mode_axis,
         },
     }
     model = build_stae_spectral_magma(cfg, U_sym=U_sym, U_mag=U_mag,
                                        cluster_id=cluster_id).to(device)
+
+    if args.frozen_stae_ckpt:
+        ckpt = torch.load(args.frozen_stae_ckpt, map_location=device,
+                           weights_only=False)
+        # The control STAEformer ckpt has bare keys (input_proj.weight, ...)
+        # while our hybrid expects them under model.staeformer.*
+        missing, unexpected = model.staeformer.load_state_dict(
+            ckpt["model"], strict=True
+        )
+        for p in model.staeformer.parameters():
+            p.requires_grad = False
+        model.staeformer.eval()  # keep dropout off for the frozen trunk
+        print(f"[frozen-trunk] loaded {args.frozen_stae_ckpt} into "
+              f"model.staeformer and froze its parameters.", flush=True)
+
     n_params = sum(p.numel() for p in model.parameters())
+    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"[model] STAE-Spectral-Magma params={n_params/1e6:.3f}M "
+          f"trainable={n_trainable/1e6:.3f}M "
           f"views={model.spectral_aug.view_names} "
           f"router={'on' if model.spectral_aug.router is not None else 'off'}",
           flush=True)
 
-    opt = torch.optim.AdamW(model.parameters(), lr=args.learning_rate,
+    # Only optimize parameters that require grad (frozen trunk excluded).
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    opt = torch.optim.AdamW(trainable, lr=args.learning_rate,
                              weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.MultiStepLR(
         opt, milestones=args.lr_milestones, gamma=args.lr_gamma,
@@ -245,8 +278,13 @@ def main():
     max_gpu_mb = 0
     t_start = time.time()
 
+    frozen_trunk = bool(args.frozen_stae_ckpt)
     for epoch in range(1, args.epochs + 1):
         model.train()
+        if frozen_trunk:
+            # Keep STAEformer in eval mode every epoch so its dropout/LN
+            # stays deterministic even though the rest of the model trains.
+            model.staeformer.eval()
         run = 0.0; nb = 0
         for batch in tr:
             x_norm = batch["x_norm"].to(device, non_blocking=True)
