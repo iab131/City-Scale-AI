@@ -56,7 +56,7 @@ We make five contributions, presented honestly with the caveats above:
 
 2. **A horizon-cluster MoE router with $\mathcal{O}(T_{out} + N_{clusters} + N_{experts})$ parameters** (§ 4.4): per-(horizon, sensor-cluster) mixing weights and a residual scale, with sensor-side gathering via a fixed cluster assignment. Distinct from existing MoE-in-traffic work (TESTAM, ST-MoE, M²FMoE) which routes per-sample or per-frequency-band. *Ablation: contributes weakly.*
 
-3. **An oracle-analysis methodology** (§ 5) that, for any K-mode spectral residual on top of a baseline predictor, computes the projection MAE $\min_{\Delta \in \text{col}(U)} \| \Delta - (Y_{true} - \text{persist}) \|_{\text{MAE}}$ — the best achievable error for *any* learner restricted to that basis. We apply it to METR-LA and find an attainable ceiling of 2.07 validation MAE at $K=128$, well below STAEformer's 2.74, yet no learner we test reaches it. This explains the field-wide pattern of plateau at STAEformer's value: the bottleneck is the *predictability gap from input to optimal coefficients*, not basis bandwidth.
+3. **An oracle-analysis methodology** (§ 5) that, for any K-mode spectral residual on top of a baseline predictor, computes the projection MAE $\min_{\Delta \in \text{col}(U)} \lVert \Delta - (Y_{true} - \text{persist}) \rVert_{\text{MAE}}$ — the best achievable error for *any* learner restricted to that basis. We apply it to METR-LA and find an attainable ceiling of 2.07 validation MAE at $K=128$, well below STAEformer's 2.74, yet no learner we test reaches it. This explains the field-wide pattern of plateau at STAEformer's value: the bottleneck is the *predictability gap from input to optimal coefficients*, not basis bandwidth.
 
 4. **A characterised negative result on magnetic Laplacians for traffic** (§ 6, § 7): the technique is genuinely novel in this domain (Mag-Mamba [Anonymous 2026] used it for POI recommendation, MagNet [Zhang et al. 2021] and MSGNN [He et al. 2022] for node classification; no prior traffic-forecasting paper applies it). We provide ablation evidence that it *actively harms* PEMS-BAY validation MAE (1.525 → 1.543 when added) and offer three plausible mechanisms (§ 8.1).
 
@@ -94,7 +94,7 @@ DSTGA-Mamba [Park et al. 2025] and WMF-Traffic [Khan et al. 2025] both combine M
 
 MagNet [Zhang et al. 2021] introduced the magnetic Laplacian $L_q = I - D_s^{-1/2}(A_s \odot e^{i \Theta_q}) D_s^{-1/2}$ — a Hermitian operator whose complex eigenvectors encode edge directionality via phase rotations — to directed-graph node classification. MSGNN [He et al. 2022] extended this to signed directed graphs. Mag-Mamba [Anonymous 2026] recently applied magnetic-Laplacian-style phase rotation directly to the Mamba state recurrence for POI recommendation: the SSM's decay-and-rotation dynamics in the complex plane are driven by edge phase differences.
 
-Two important differences with our work: (i) **No prior work applies magnetic Laplacians to traffic forecasting**. (ii) Where Mag-Mamba modifies the SSM recurrence to operate in the complex domain, we project node-feature tensors through a complex magnetic eigenbasis, fold real and imaginary parts into the feature axis ($[Re | Im]$), and run a real-valued bi-axis Mamba on the folded representation. This avoids the need for a complex selective-scan kernel.
+Two important differences with our work: (i) **No prior work applies magnetic Laplacians to traffic forecasting**. (ii) Where Mag-Mamba modifies the SSM recurrence to operate in the complex domain, we project node-feature tensors through a complex magnetic eigenbasis, fold real and imaginary parts into the feature axis (concatenating $[\text{Re}, \text{Im}]$ channels), and run a real-valued bi-axis Mamba on the folded representation. This avoids the need for a complex selective-scan kernel.
 
 The hypothesis that motivated us was simple. Traffic on a freeway is directional: congestion onset propagates downstream at ~10-30 mph (kinematic-wave speed); recovery shockwaves propagate upstream against traffic. STAEformer's spatial attention, being permutation-equivariant over sensors, cannot recover this directional structure from edge weights alone. The magnetic Laplacian explicitly encodes direction in eigenvector phase. *A priori* this should help, particularly at long horizons (60 min) where directional propagation has time to act. § 7-8 explain why this hypothesis failed empirically.
 
@@ -223,7 +223,7 @@ for $\tau \in \{1, 2, ..., 6\}$ (5- to 30-minute lead times). If $\sup_\tau c_{i
 Given $A_{dir}$, the magnetic Laplacian with charge $q$ is
 
 $$
-A_s = \tfrac{1}{2}(A_{dir} + A_{dir}^T), \quad \Theta_q = 2 \pi q (A_{dir} - A_{dir}^T), \quad L_q = I - D_s^{-1/2}(A_s \odot e^{i \Theta_q}) D_s^{-1/2}
+A_s = \frac{1}{2}(A_{dir} + A_{dir}^T), \quad \Theta_q = 2 \pi q (A_{dir} - A_{dir}^T), \quad L_q = I - D_s^{-1/2}(A_s \odot e^{i \Theta_q}) D_s^{-1/2}
 $$
 
 $L_q$ is Hermitian; we eigendecompose to obtain a complex basis $U_q \in \mathbb{C}^{N \times K}$. We use $q = 0.10$.
@@ -257,7 +257,7 @@ $$
 y_K = \text{MambaScan}_K(\text{LN}(h)) \quad \text{(scan along K, with (B,T) contracted into batch)}
 $$
 $$
-g = \sigma(W [y_T \;|\; y_K]), \quad \text{out} = g \cdot y_T + (1-g) \cdot y_K + h
+g = \sigma\!\left(W \cdot \text{concat}(y_T, y_K)\right), \quad \text{out} = g \cdot y_T + (1-g) \cdot y_K + h
 $$
 
 The temporal scan is conventional and matches standard Mamba usage. **The mode-axis scan is the novelty**: it treats the $K$ bottom eigenmodes as a sequence with a meaningful ordering (eigenvalue magnitude). Low modes correspond to global, smooth patterns (e.g., the city-wide rush-hour mean); high modes correspond to localized, sensor-level perturbations (incidents, shockwaves). The selective scan, with its data-dependent gating, can in principle ask "given that the global rush-hour mode is currently active, how should I update the localized-congestion modes?"
@@ -297,7 +297,7 @@ Mixed precision: bf16 autocast on H200 GPUs. The eigh solver in the learned-sema
 We introduce a methodology for quantifying the *upper bound* on what any spectral residual learner can achieve. Given a baseline predictor producing $\hat{Y}_{base}$ (e.g., last-step persistence) and a target $Y_{true}$, a spectral residual restricted to lie in $\text{col}(U)$ for some basis $U \in \mathbb{R}^{N \times K}$ achieves at best
 
 $$
-L^*_K = \min_{\Delta \in \text{col}(U)} \| \Delta - (Y_{true} - \hat{Y}_{base}) \|_{\text{MAE}}
+L^*_K = \min_{\Delta \in \text{col}(U)} \lVert \Delta - (Y_{true} - \hat{Y}_{base}) \rVert_{\text{MAE}}
 $$
 
 This is computed in closed form by projecting $(Y_{true} - \hat{Y}_{base})$ onto $U$ — the resulting projection-reconstruct MAE is $L^*_K$.
