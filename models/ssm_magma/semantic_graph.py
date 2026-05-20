@@ -97,7 +97,16 @@ class SemanticGraph(nn.Module):
             evals, V = torch.linalg.eigh(L_stable)
         except Exception as e:
             if self.U.numel() > 0:
-                # Keep the last good basis; skip this refresh.
+                # Keep the last good basis but DETACH it. The cached basis
+                # carries an autograd graph from the step that produced it;
+                # that step's backward has already freed its saved tensors,
+                # so any new backward that traverses the cached basis would
+                # raise "backward through the graph a second time". Detaching
+                # converts it to a constant for this forward pass (no
+                # gradient flow into embed.weight for this step), which is
+                # the safe choice when we cannot compute a fresh basis.
+                self.U = self.U.detach()
+                self.evals = self.evals.detach()
                 return
             # Cold start: ditch the learned graph and use the identity.
             n = L.shape[0]
